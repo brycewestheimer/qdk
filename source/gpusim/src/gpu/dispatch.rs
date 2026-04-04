@@ -334,6 +334,43 @@ pub fn dispatch_multi_controlled_gate(
     queue.submit(std::iter::once(encoder.finish()));
 }
 
+/// Parameters for the measurement (probability reduction) shader.
+///
+/// Layout matches `MeasureParams` in `measurement.wgsl` exactly.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MeasureParams {
+    /// Bit position of the target qubit (informational; shader uses `measure_mask`).
+    pub target_bit: u32,
+    /// Total number of qubits in the system.
+    pub num_qubits: u32,
+    /// Bitmask of qubits being measured. Bit `i` is set if the qubit at
+    /// internal bit position `i` is part of the measurement.
+    pub measure_mask: u32,
+    /// Padding for 16-byte alignment.
+    #[allow(clippy::pub_underscore_fields)]
+    pub _pad: u32,
+}
+
+/// Parameters for the state collapse shader.
+///
+/// Layout matches `CollapseParams` in `collapse.wgsl` exactly.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CollapseParams {
+    /// Bitmask of measured qubits (same as in `MeasureParams`).
+    pub measure_mask: u32,
+    /// Measurement result: 1 if the measured parity was odd, 0 if even.
+    pub measured_value: u32,
+    /// Normalization factor: `1.0 / sqrt(P(measured_outcome))`.
+    pub normalization_factor: f32,
+    /// Total number of qubits.
+    pub num_qubits: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<MeasureParams>() == 16);
+const _: () = assert!(std::mem::size_of::<CollapseParams>() == 16);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +404,25 @@ mod tests {
     #[test]
     fn multi_controlled_gate_params_alignment_is_correct() {
         assert_eq!(std::mem::size_of::<MultiControlledGateParams>() % 16, 0);
+    }
+
+    #[test]
+    fn measure_params_size_is_16_bytes() {
+        assert_eq!(std::mem::size_of::<MeasureParams>(), 16);
+    }
+
+    #[test]
+    fn measure_params_alignment_is_correct() {
+        assert_eq!(std::mem::size_of::<MeasureParams>() % 16, 0);
+    }
+
+    #[test]
+    fn collapse_params_size_is_16_bytes() {
+        assert_eq!(std::mem::size_of::<CollapseParams>(), 16);
+    }
+
+    #[test]
+    fn collapse_params_alignment_is_correct() {
+        assert_eq!(std::mem::size_of::<CollapseParams>() % 16, 0);
     }
 }

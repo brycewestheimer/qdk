@@ -112,6 +112,19 @@ impl QubitMap {
         Ok(())
     }
 
+    /// Returns all active qubit mappings as `(bit_position, qubit_id)` pairs.
+    ///
+    /// Used by `get_state()` to build the permutation from internal bit
+    /// positions to user-facing qubit IDs.
+    #[must_use]
+    pub fn active_mappings(&self) -> Vec<(usize, usize)> {
+        self.id_to_bit
+            .iter()
+            .enumerate()
+            .filter_map(|(id, opt_bit)| opt_bit.map(|bit| (bit, id)))
+            .collect()
+    }
+
     /// Returns the highest bit position ever used, which determines the
     /// minimum state vector size as `2^(max_bit + 1)`.
     ///

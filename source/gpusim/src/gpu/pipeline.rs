@@ -1,12 +1,14 @@
-/// Cached compute pipelines for gate operations.
+/// Cached compute pipelines for gate and measurement operations.
 ///
-/// All three gate kernels (single-qubit, two-qubit, multi-controlled) use
-/// the same binding pattern:
+/// Gate kernels (single-qubit, two-qubit, multi-controlled) and the collapse
+/// shader share a binding pattern:
 ///   `@binding(0)` = storage `read_write` (state vector)
-///   `@binding(1)` = uniform (gate parameters)
+///   `@binding(1)` = uniform (parameters)
 ///
-/// The bind group layout is shared; only the uniform buffer size differs
-/// per dispatch.
+/// The measurement shader uses a different layout with three bindings:
+///   `@binding(0)` = storage `read` (state vector, read-only)
+///   `@binding(1)` = uniform (parameters)
+///   `@binding(2)` = storage `read_write` (partial sums output)
 pub struct PipelineCache {
     /// Pipeline for single-qubit gate application.
     single_qubit: wgpu::ComputePipeline,
@@ -14,8 +16,14 @@ pub struct PipelineCache {
     two_qubit: wgpu::ComputePipeline,
     /// Pipeline for multi-controlled gate application.
     multi_controlled: wgpu::ComputePipeline,
-    /// Bind group layout shared by all gate pipelines.
-    bind_group_layout: wgpu::BindGroupLayout,
+    /// Pipeline for measurement probability reduction.
+    measurement: wgpu::ComputePipeline,
+    /// Pipeline for post-measurement state collapse.
+    collapse: wgpu::ComputePipeline,
+    /// Bind group layout shared by gate and collapse pipelines (2 bindings).
+    gate_layout: wgpu::BindGroupLayout,
+    /// Bind group layout for the measurement pipeline (3 bindings).
+    measurement_layout: wgpu::BindGroupLayout,
 }
 
 impl PipelineCache {
@@ -24,11 +32,14 @@ impl PipelineCache {
     /// This is called once during simulator initialization. Shader compilation
     /// can take 10-100ms, so it must not be on the hot path.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn new(device: &wgpu::Device) -> Self {
         // Load all WGSL shader sources (embedded at compile time)
         let single_qubit_source = include_str!("../shaders/single_qubit_gate.wgsl");
         let two_qubit_source = include_str!("../shaders/two_qubit_gate.wgsl");
         let multi_controlled_source = include_str!("../shaders/multi_controlled_gate.wgsl");
+        let measurement_source = include_str!("../shaders/measurement.wgsl");
+        let collapse_source = include_str!("../shaders/collapse.wgsl");
 
         let single_qubit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("single_qubit_gate"),
@@ -42,11 +53,17 @@ impl PipelineCache {
             label: Some("multi_controlled_gate"),
             source: wgpu::ShaderSource::Wgsl(multi_controlled_source.into()),
         });
+        let measurement_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("measurement"),
+            source: wgpu::ShaderSource::Wgsl(measurement_source.into()),
+        });
+        let collapse_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("collapse"),
+            source: wgpu::ShaderSource::Wgsl(collapse_source.into()),
+        });
 
-        // Create the bind group layout with two entries:
-        //   binding 0: state vector (read-write storage buffer)
-        //   binding 1: gate parameters (uniform buffer)
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        // Gate/collapse layout: 2 bindings (rw storage + uniform)
+        let gate_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("gate_bind_group_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -72,16 +89,61 @@ impl PipelineCache {
             ],
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        // Measurement layout: 3 bindings (read-only storage + uniform + rw storage)
+        let measurement_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("measurement_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let gate_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("gate_pipeline_layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[&gate_layout],
             push_constant_ranges: &[],
         });
 
-        let create_pipeline = |module: &wgpu::ShaderModule, label: &str| {
+        let measurement_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("measurement_pipeline_layout"),
+                bind_group_layouts: &[&measurement_layout],
+                push_constant_ranges: &[],
+            });
+
+        let create_gate_pipeline = |module: &wgpu::ShaderModule, label: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
-                layout: Some(&pipeline_layout),
+                layout: Some(&gate_pipeline_layout),
                 module,
                 entry_point: Some("main"),
                 compilation_options: Default::default(),
@@ -89,14 +151,26 @@ impl PipelineCache {
             })
         };
 
+        let measurement = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("measurement_pipeline"),
+            layout: Some(&measurement_pipeline_layout),
+            module: &measurement_module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         Self {
-            single_qubit: create_pipeline(&single_qubit_module, "single_qubit_gate_pipeline"),
-            two_qubit: create_pipeline(&two_qubit_module, "two_qubit_gate_pipeline"),
-            multi_controlled: create_pipeline(
+            single_qubit: create_gate_pipeline(&single_qubit_module, "single_qubit_gate_pipeline"),
+            two_qubit: create_gate_pipeline(&two_qubit_module, "two_qubit_gate_pipeline"),
+            multi_controlled: create_gate_pipeline(
                 &multi_controlled_module,
                 "multi_controlled_gate_pipeline",
             ),
-            bind_group_layout,
+            measurement,
+            collapse: create_gate_pipeline(&collapse_module, "collapse_pipeline"),
+            gate_layout,
+            measurement_layout,
         }
     }
 
@@ -118,9 +192,27 @@ impl PipelineCache {
         &self.multi_controlled
     }
 
-    /// Returns the bind group layout for gate pipelines.
+    /// Returns the measurement probability reduction pipeline.
+    #[must_use]
+    pub fn measurement_pipeline(&self) -> &wgpu::ComputePipeline {
+        &self.measurement
+    }
+
+    /// Returns the post-measurement state collapse pipeline.
+    #[must_use]
+    pub fn collapse_pipeline(&self) -> &wgpu::ComputePipeline {
+        &self.collapse
+    }
+
+    /// Returns the bind group layout for gate and collapse pipelines.
     #[must_use]
     pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
-        &self.bind_group_layout
+        &self.gate_layout
+    }
+
+    /// Returns the bind group layout for the measurement pipeline.
+    #[must_use]
+    pub fn measurement_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.measurement_layout
     }
 }

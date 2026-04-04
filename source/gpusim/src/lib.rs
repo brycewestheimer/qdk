@@ -1,10 +1,13 @@
 pub mod error;
 pub mod gates;
 pub mod gpu;
+pub mod measurement;
 pub mod qubit_map;
 
 use num_bigint::BigUint;
 use num_complex::Complex64;
+use num_traits::Zero;
+use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
@@ -14,6 +17,7 @@ use crate::gpu::device::GpuDevice;
 use crate::gpu::dispatch;
 use crate::gpu::pipeline::PipelineCache;
 use crate::gpu::state_buffer::StateBuffer;
+use crate::measurement::MeasurementEngine;
 use crate::qubit_map::QubitMap;
 
 /// A GPU-accelerated dense state vector quantum simulator.
@@ -30,6 +34,7 @@ pub struct GpuQuantumSim {
     pipelines: PipelineCache,
     qubit_map: QubitMap,
     rng: StdRng,
+    measurement_engine: MeasurementEngine,
 }
 
 impl GpuQuantumSim {
@@ -50,12 +55,15 @@ impl GpuQuantumSim {
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::from_entropy(),
         };
+        let measurement_engine =
+            MeasurementEngine::new(gpu.device(), measurement::MAX_MEASUREMENT_WORKGROUPS);
         Ok(Self {
             gpu,
             state,
             pipelines,
             qubit_map,
             rng,
+            measurement_engine,
         })
     }
 
@@ -260,36 +268,278 @@ impl GpuQuantumSim {
     }
 
     // ========================================================================
+    // Measurement
+    // ========================================================================
+
+    /// Measures a single qubit in the computational basis.
+    ///
+    /// Returns `true` if the qubit collapsed to |1>, `false` if |0>.
+    /// The state vector is projected and renormalized in-place on the GPU.
+    ///
+    /// # Measurement pipeline
+    ///
+    /// 1. Look up the qubit's internal bit position from the qubit map.
+    /// 2. Dispatch the measurement shader to compute P(qubit = |1>).
+    /// 3. Handle deterministic edge cases:
+    ///    - P < 1e-10: return false (certainly |0>), skip collapse.
+    ///    - P > 1 - 1e-10: return true (certainly |1>), skip collapse.
+    /// 4. Sample the RNG: result = (random < P).
+    /// 5. Dispatch the collapse shader with the appropriate normalization.
+    pub fn measure(&mut self, id: usize) -> bool {
+        let bit = self
+            .qubit_map
+            .bit_position(id)
+            .expect("qubit should be allocated");
+        #[allow(clippy::cast_possible_truncation)]
+        let measure_mask = 1u32 << bit;
+        let num_qubits = self.state.num_qubits();
+
+        let p1 = self
+            .measurement_engine
+            .compute_probability(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                measure_mask,
+                num_qubits,
+            )
+            .expect("probability computation should succeed");
+
+        // Deterministic cases: skip collapse dispatch entirely.
+        if p1 < 1e-10 {
+            return false;
+        }
+        if p1 > 1.0 - 1e-10 {
+            return true;
+        }
+
+        // Probabilistic case: sample from Born rule distribution.
+        let random: f32 = self.rng.r#gen();
+        let result = random < p1;
+
+        // Collapse: zero inconsistent amplitudes, renormalize consistent ones.
+        let probability = if result { p1 } else { 1.0 - p1 };
+        self.measurement_engine.collapse_state(
+            self.gpu.device(),
+            self.gpu.queue(),
+            &self.pipelines,
+            &self.state,
+            measure_mask,
+            result,
+            probability,
+            num_qubits,
+        );
+
+        result
+    }
+
+    /// Performs a joint parity measurement on multiple qubits.
+    ///
+    /// Returns `true` if the measured parity is odd, `false` if even.
+    /// The measurement collapses the state to the subspace with matching parity.
+    ///
+    /// For a single qubit, this is equivalent to `measure()`.
+    ///
+    /// The parity is defined as: for basis state |i>, the parity of the measured
+    /// qubits is `countOneBits(i & measure_mask) mod 2`. If odd, it contributes
+    /// to `P(odd parity)`.
+    pub fn joint_measure(&mut self, ids: &[usize]) -> bool {
+        let measure_mask = self.build_measure_mask(ids);
+        let num_qubits = self.state.num_qubits();
+
+        let p_odd = self
+            .measurement_engine
+            .compute_probability(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                measure_mask,
+                num_qubits,
+            )
+            .expect("probability computation should succeed");
+
+        if p_odd < 1e-10 {
+            return false;
+        }
+        if p_odd > 1.0 - 1e-10 {
+            return true;
+        }
+
+        let random: f32 = self.rng.r#gen();
+        let result = random < p_odd;
+
+        let probability = if result { p_odd } else { 1.0 - p_odd };
+        self.measurement_engine.collapse_state(
+            self.gpu.device(),
+            self.gpu.queue(),
+            &self.pipelines,
+            &self.state,
+            measure_mask,
+            result,
+            probability,
+            num_qubits,
+        );
+
+        result
+    }
+
+    /// Computes the probability of a joint measurement yielding odd parity,
+    /// WITHOUT collapsing the state.
+    ///
+    /// Returns `f64` for API compatibility with `QuantumSim`, even though
+    /// the internal computation uses f32.
+    pub fn joint_probability(&mut self, ids: &[usize]) -> f64 {
+        let measure_mask = self.build_measure_mask(ids);
+        let num_qubits = self.state.num_qubits();
+
+        let p = self
+            .measurement_engine
+            .compute_probability(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                measure_mask,
+                num_qubits,
+            )
+            .expect("probability computation should succeed");
+
+        f64::from(p)
+    }
+
+    /// Returns `true` if the qubit is in the |0> state (within tolerance).
+    ///
+    /// Computes P(qubit = |1>) and checks if it is below 1e-6.
+    /// Does NOT collapse the state.
+    pub fn qubit_is_zero(&mut self, id: usize) -> bool {
+        let bit = self
+            .qubit_map
+            .bit_position(id)
+            .expect("qubit should be allocated");
+        #[allow(clippy::cast_possible_truncation)]
+        let measure_mask = 1u32 << bit;
+        let num_qubits = self.state.num_qubits();
+
+        let p1 = self
+            .measurement_engine
+            .compute_probability(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                measure_mask,
+                num_qubits,
+            )
+            .expect("probability computation should succeed");
+
+        p1 < 1e-6
+    }
+
+    // ========================================================================
+    // State management
+    // ========================================================================
+
+    /// Releases a qubit, returning its ID and bit position to the recycling pool.
+    ///
+    /// If the qubit is not in |0>, it is measured and collapsed to |0> first
+    /// (matching `QuantumSim::release()` semantics). This ensures the bit
+    /// position can be safely reused by a future allocation.
+    ///
+    /// Release does NOT shrink the state vector. The dense simulator's state
+    /// vector only grows; released bit positions become semantically inactive.
+    pub fn release(&mut self, id: usize) {
+        if !self.qubit_is_zero(id) {
+            // Measure to collapse, then flip to |0> if needed.
+            if self.measure(id) {
+                self.x(id);
+            }
+        }
+        self.qubit_map
+            .release(id)
+            .expect("qubit should be allocated for release");
+    }
+
+    /// Resets the RNG to a deterministic seed.
+    ///
+    /// This affects all future measurements. Combined with a fixed initial
+    /// state, this enables exact replay of measurement sequences.
+    pub fn set_rng_seed(&mut self, seed: u64) {
+        self.rng = StdRng::seed_from_u64(seed);
+    }
+
+    // ========================================================================
     // State readout
     // ========================================================================
 
-    /// Reads back the current quantum state from the GPU.
+    /// Reads back the quantum state from the GPU and returns a sparse
+    /// representation with qubit-ID-ordered indices.
     ///
-    /// Returns a sparse representation: a vector of `(basis_state, amplitude)`
-    /// pairs where the amplitude magnitude exceeds a threshold (1e-10), along
-    /// with the total qubit count.
+    /// # Returns
     ///
-    /// The basis state indices use little-endian qubit ordering, matching the
-    /// internal state vector layout.
+    /// `(Vec<(BigUint, Complex64)>, usize)`:
+    /// - The vector contains `(basis_state_index, amplitude)` pairs for all
+    ///   amplitudes with `|amplitude|^2 > 1e-10`.
+    /// - The `usize` is the number of active qubits.
+    ///
+    /// # Index ordering
+    ///
+    /// Bit `k` in each returned basis state index corresponds to qubit ID `k`
+    /// (NOT internal bit position `k`). The permutation from internal bit
+    /// positions to qubit IDs is computed from [`QubitMap::active_mappings`].
     pub fn get_state(&self) -> Result<(Vec<(BigUint, Complex64)>, usize), GpuSimError> {
-        let amplitudes = self.state.readback(self.gpu.device(), self.gpu.queue())?;
-        let num_qubits = self.state.num_qubits() as usize;
+        let raw_amplitudes = self.state.readback(self.gpu.device(), self.gpu.queue())?;
         let threshold = 1e-10_f64;
 
-        let sparse: Vec<(BigUint, Complex64)> = amplitudes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &(re, im))| {
-                let c = Complex64::new(f64::from(re), f64::from(im));
-                if c.norm_sqr() > threshold {
-                    Some((BigUint::from(i), c))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Get the mapping: Vec<(bit_position, qubit_id)> for all active qubits.
+        let active_mappings = self.qubit_map.active_mappings();
 
-        Ok((sparse, num_qubits))
+        let mut result: Vec<(BigUint, Complex64)> = Vec::new();
+
+        for (raw_idx, &(re, im)) in raw_amplitudes.iter().enumerate() {
+            let amplitude = Complex64::new(f64::from(re), f64::from(im));
+            if amplitude.norm_sqr() <= threshold {
+                continue;
+            }
+
+            // Remap bits: for each active qubit, check if its internal bit
+            // position is set in the raw index, and if so, set the qubit ID
+            // bit in the output index.
+            let mut permuted_idx = BigUint::zero();
+            for &(bit_pos, qubit_id) in &active_mappings {
+                if raw_idx & (1 << bit_pos) != 0 {
+                    permuted_idx.set_bit(qubit_id as u64, true);
+                }
+            }
+
+            result.push((permuted_idx, amplitude));
+        }
+
+        result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Ok((result, self.qubit_map.active_count()))
+    }
+
+    /// Returns a human-readable dump of the current quantum state.
+    ///
+    /// Reads back the state vector from the GPU, filters near-zero amplitudes,
+    /// and formats each surviving basis state with its amplitude and probability.
+    pub fn dump(&self) -> Result<String, GpuSimError> {
+        let (state, num_qubits) = self.get_state()?;
+        let mut lines = Vec::new();
+        lines.push(format!("STATE ({num_qubits} qubits):"));
+        for (idx, amp) in &state {
+            let sign = if amp.im >= 0.0 { "+" } else { "-" };
+            lines.push(format!(
+                "  |{:0width$b}>: {:.6} {sign} {:.6}i  (p = {:.6})",
+                idx,
+                amp.re,
+                amp.im.abs(),
+                amp.norm_sqr(),
+                width = num_qubits,
+            ));
+        }
+        Ok(lines.join("\n"))
     }
 
     // ========================================================================
@@ -347,6 +597,18 @@ impl GpuQuantumSim {
         let mut mask = 0u32;
         for &ctl in ctls {
             mask |= 1 << self.resolve_bit(ctl);
+        }
+        mask
+    }
+
+    /// Builds a measurement bitmask from a slice of qubit IDs.
+    ///
+    /// Each qubit ID is resolved to its internal bit position, and that bit
+    /// is set in the returned mask.
+    fn build_measure_mask(&self, ids: &[usize]) -> u32 {
+        let mut mask = 0u32;
+        for &id in ids {
+            mask |= 1u32 << self.resolve_bit(id);
         }
         mask
     }
