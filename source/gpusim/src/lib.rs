@@ -2,6 +2,8 @@ pub mod error;
 pub mod gates;
 pub mod gpu;
 pub mod measurement;
+#[cfg(feature = "python")]
+mod python;
 pub mod qubit_map;
 
 use num_bigint::BigUint;

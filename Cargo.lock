@@ -2064,6 +2064,7 @@ dependencies = [
  "num-bigint",
  "num-complex",
  "num-traits",
+ "pyo3",
  "quantum-sparse-sim",
  "rand 0.8.5",
  "rustc-hash",

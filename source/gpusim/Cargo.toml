@@ -21,6 +21,23 @@ rustc-hash = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 
+[target.'cfg(not(any(target_os = "windows")))'.dependencies]
+pyo3 = { workspace = true, optional = true, features = [
+    "abi3-py310",
+    "extension-module",
+    "num-bigint",
+    "num-complex",
+] }
+
+[target.'cfg(any(target_os = "windows"))'.dependencies]
+pyo3 = { workspace = true, optional = true, features = [
+    "abi3-py310",
+    "extension-module",
+    "generate-import-lib",
+    "num-bigint",
+    "num-complex",
+] }
+
 [dev-dependencies]
 criterion = { workspace = true }
 approx = "0.5"
@@ -30,13 +47,17 @@ quantum-sparse-sim = { workspace = true }
 default = []
 gpu-tests = []
 f64_emulation = []
-python = []
+python = ["pyo3"]
 
 [lints]
 workspace = true
 
 [lib]
+crate-type = ["cdylib", "rlib"]
 doctest = false
+
+[package.metadata.maturin]
+name = "qdk_gpu_sim"
 
 [[bench]]
 name = "single_gate"
