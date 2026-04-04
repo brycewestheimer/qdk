@@ -97,6 +97,21 @@ impl QubitMap {
         self.count
     }
 
+    /// Swaps the bit-position mappings of two qubit IDs.
+    ///
+    /// After this call, `id1` maps to the bit position that `id2` previously
+    /// mapped to, and vice versa. This is a CPU-only operation that does not
+    /// modify the GPU state vector.
+    pub fn swap(&mut self, id1: usize, id2: usize) -> Result<(), GpuSimError> {
+        let bit1 = self.bit_position(id1)?;
+        let bit2 = self.bit_position(id2)?;
+        self.id_to_bit[id1] = Some(bit2);
+        self.id_to_bit[id2] = Some(bit1);
+        self.bit_to_id[bit1] = Some(id2);
+        self.bit_to_id[bit2] = Some(id1);
+        Ok(())
+    }
+
     /// Returns the highest bit position ever used, which determines the
     /// minimum state vector size as `2^(max_bit + 1)`.
     ///
@@ -192,6 +207,40 @@ mod tests {
 
         map.release(q0).expect("release should succeed");
         assert_eq!(map.active_count(), 2);
+    }
+
+    #[test]
+    fn swap_exchanges_bit_positions() {
+        let mut map = QubitMap::new();
+        let q0 = map.allocate(); // bit 0
+        let q1 = map.allocate(); // bit 1
+        let q2 = map.allocate(); // bit 2
+
+        map.swap(q0, q2).expect("swap should succeed");
+        assert_eq!(map.bit_position(q0).expect("q0 should exist"), 2);
+        assert_eq!(map.bit_position(q2).expect("q2 should exist"), 0);
+        // q1 is unchanged
+        assert_eq!(map.bit_position(q1).expect("q1 should exist"), 1);
+    }
+
+    #[test]
+    fn swap_is_reversible() {
+        let mut map = QubitMap::new();
+        let q0 = map.allocate();
+        let q1 = map.allocate();
+
+        map.swap(q0, q1).expect("swap should succeed");
+        map.swap(q0, q1).expect("reverse swap should succeed");
+        assert_eq!(map.bit_position(q0).expect("q0 should exist"), 0);
+        assert_eq!(map.bit_position(q1).expect("q1 should exist"), 1);
+    }
+
+    #[test]
+    fn swap_nonexistent_qubit() {
+        let mut map = QubitMap::new();
+        let q0 = map.allocate();
+        let result = map.swap(q0, 99);
+        assert!(matches!(result, Err(GpuSimError::QubitNotFound(99))));
     }
 
     #[test]

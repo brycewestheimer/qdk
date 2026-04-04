@@ -9,6 +9,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use crate::error::GpuSimError;
+use crate::gates::Mat2x2;
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dispatch;
 use crate::gpu::pipeline::PipelineCache;
@@ -80,27 +81,187 @@ impl GpuQuantumSim {
         id
     }
 
+    // ========================================================================
+    // Single-qubit gates
+    // ========================================================================
+
     /// Applies the Hadamard gate to the target qubit.
     ///
     /// # Panics
     /// Panics if `target` is not a valid allocated qubit ID.
     pub fn h(&mut self, target: usize) {
-        let bit = self
-            .qubit_map
-            .bit_position(target)
-            .expect("target qubit should be allocated");
+        self.dispatch_single_qubit(target, &crate::gates::H);
+    }
+
+    /// Applies the Pauli-X gate to the target qubit.
+    pub fn x(&mut self, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::X);
+    }
+
+    /// Applies the Pauli-Y gate to the target qubit.
+    pub fn y(&mut self, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::Y);
+    }
+
+    /// Applies the Pauli-Z gate to the target qubit.
+    pub fn z(&mut self, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::Z);
+    }
+
+    /// Applies the S gate (sqrt(Z)) to the target qubit.
+    pub fn s(&mut self, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::S);
+    }
+
+    /// Applies the S-adjoint gate to the target qubit.
+    pub fn sadj(&mut self, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::SADJ);
+    }
+
+    /// Applies the T gate (sqrt(S)) to the target qubit.
+    pub fn t(&mut self, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::T);
+    }
+
+    /// Applies the T-adjoint gate to the target qubit.
+    pub fn tadj(&mut self, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::TADJ);
+    }
+
+    /// Applies the SX (sqrt(X)) gate to the target qubit.
+    pub fn sx(&mut self, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::SX);
+    }
+
+    /// Applies the SX-adjoint gate to the target qubit.
+    pub fn sxadj(&mut self, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::SXADJ);
+    }
+
+    /// Applies the Rx rotation gate to the target qubit.
+    pub fn rx(&mut self, theta: f64, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::rx(theta));
+    }
+
+    /// Applies the Ry rotation gate to the target qubit.
+    pub fn ry(&mut self, theta: f64, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::ry(theta));
+    }
+
+    /// Applies the Rz rotation gate to the target qubit.
+    pub fn rz(&mut self, theta: f64, target: usize) {
+        self.dispatch_single_qubit(target, &crate::gates::rz(theta));
+    }
+
+    // ========================================================================
+    // Multi-controlled gates
+    // ========================================================================
+
+    /// Multi-controlled X gate.
+    ///
+    /// - 0 controls: X gate
+    /// - 1 control: CNOT
+    /// - 2 controls: Toffoli
+    pub fn mcx(&mut self, ctls: &[usize], target: usize) {
+        self.dispatch_mc_gate(ctls, target, &crate::gates::X);
+    }
+
+    /// Multi-controlled Y gate.
+    pub fn mcy(&mut self, ctls: &[usize], target: usize) {
+        self.dispatch_mc_gate(ctls, target, &crate::gates::Y);
+    }
+
+    /// Multi-controlled Z gate.
+    pub fn mcz(&mut self, ctls: &[usize], target: usize) {
+        self.dispatch_mc_gate(ctls, target, &crate::gates::Z);
+    }
+
+    /// Multi-controlled Hadamard gate.
+    pub fn mch(&mut self, ctls: &[usize], target: usize) {
+        self.dispatch_mc_gate(ctls, target, &crate::gates::H);
+    }
+
+    /// Multi-controlled S gate.
+    pub fn mcs(&mut self, ctls: &[usize], target: usize) {
+        self.dispatch_mc_gate(ctls, target, &crate::gates::S);
+    }
+
+    /// Multi-controlled S-adjoint gate.
+    pub fn mcsadj(&mut self, ctls: &[usize], target: usize) {
+        self.dispatch_mc_gate(ctls, target, &crate::gates::SADJ);
+    }
+
+    /// Multi-controlled T gate.
+    pub fn mct(&mut self, ctls: &[usize], target: usize) {
+        self.dispatch_mc_gate(ctls, target, &crate::gates::T);
+    }
+
+    /// Multi-controlled T-adjoint gate.
+    pub fn mctadj(&mut self, ctls: &[usize], target: usize) {
+        self.dispatch_mc_gate(ctls, target, &crate::gates::TADJ);
+    }
+
+    /// Multi-controlled Rz gate.
+    pub fn mcrz(&mut self, ctls: &[usize], theta: f64, target: usize) {
+        self.dispatch_mc_gate(ctls, target, &crate::gates::rz(theta));
+    }
+
+    /// Multi-controlled phase gate: diag(1, phase) with controls.
+    ///
+    /// `phase` is a complex number. The gate applies diag(1, phase) to the
+    /// target qubit when all control qubits are |1>.
+    pub fn mcphase(&mut self, ctls: &[usize], phase: Complex64, target: usize) {
         #[allow(clippy::cast_possible_truncation)]
-        let bit = bit as u32;
-        dispatch::dispatch_single_qubit_gate(
+        let mat = crate::gates::phase_gate(phase.re as f32, phase.im as f32);
+        self.dispatch_mc_gate(ctls, target, &mat);
+    }
+
+    // ========================================================================
+    // Two-qubit gates (native 4x4 kernel)
+    // ========================================================================
+
+    /// SWAP gate using the native two-qubit kernel.
+    ///
+    /// This is a physical gate that applies the 4x4 SWAP unitary to the state
+    /// vector. It is NOT a qubit ID relabeling — see [`swap_qubit_ids`](Self::swap_qubit_ids)
+    /// for that.
+    pub fn swap(&mut self, q1: usize, q2: usize) {
+        let bit_a = self.resolve_bit(q1);
+        let bit_b = self.resolve_bit(q2);
+        dispatch::dispatch_two_qubit_gate(
             self.gpu.device(),
             self.gpu.queue(),
             &self.pipelines,
             &self.state,
-            &crate::gates::H,
-            bit,
+            &crate::gates::SWAP,
+            bit_a,
+            bit_b,
             self.state.num_qubits(),
         );
     }
+
+    // ========================================================================
+    // Qubit ID operations (CPU-only)
+    // ========================================================================
+
+    /// Swaps the qubit ID mapping for two qubits.
+    ///
+    /// This is a CPU-only operation — it relabels which user-facing qubit ID
+    /// maps to which internal bit position. No GPU operation or state vector
+    /// modification occurs. The state vector is unchanged; only future gate
+    /// calls using these qubit IDs will resolve to swapped bit positions.
+    ///
+    /// This is distinct from [`swap`](Self::swap), which applies the physical
+    /// SWAP gate to the state vector on the GPU.
+    pub fn swap_qubit_ids(&mut self, qubit1: usize, qubit2: usize) {
+        self.qubit_map
+            .swap(qubit1, qubit2)
+            .expect("both qubits should be allocated");
+    }
+
+    // ========================================================================
+    // State readout
+    // ========================================================================
 
     /// Reads back the current quantum state from the GPU.
     ///
@@ -131,6 +292,10 @@ impl GpuQuantumSim {
         Ok((sparse, num_qubits))
     }
 
+    // ========================================================================
+    // Info accessors
+    // ========================================================================
+
     /// Returns information about the GPU adapter in use.
     #[must_use]
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
@@ -147,5 +312,80 @@ impl GpuQuantumSim {
     #[must_use]
     pub fn rng(&self) -> &StdRng {
         &self.rng
+    }
+
+    // ========================================================================
+    // Internal dispatch helpers
+    // ========================================================================
+
+    /// Resolves a user-facing qubit ID to a GPU bit position.
+    fn resolve_bit(&self, id: usize) -> u32 {
+        #[allow(clippy::cast_possible_truncation)]
+        let bit = self
+            .qubit_map
+            .bit_position(id)
+            .expect("qubit should be allocated") as u32;
+        bit
+    }
+
+    /// Dispatches a single-qubit gate to the GPU.
+    fn dispatch_single_qubit(&mut self, target: usize, matrix: &Mat2x2) {
+        let bit = self.resolve_bit(target);
+        dispatch::dispatch_single_qubit_gate(
+            self.gpu.device(),
+            self.gpu.queue(),
+            &self.pipelines,
+            &self.state,
+            matrix,
+            bit,
+            self.state.num_qubits(),
+        );
+    }
+
+    /// Builds a control bitmask from a slice of control qubit IDs.
+    fn build_control_mask(&self, ctls: &[usize]) -> u32 {
+        let mut mask = 0u32;
+        for &ctl in ctls {
+            mask |= 1 << self.resolve_bit(ctl);
+        }
+        mask
+    }
+
+    /// Dispatch routing for multi-controlled gates.
+    ///
+    /// - 0 controls: dispatches the single-qubit kernel directly.
+    /// - 1+ controls: builds a `control_mask` and dispatches the multi-controlled kernel.
+    fn dispatch_mc_gate(&mut self, ctls: &[usize], target: usize, matrix: &Mat2x2) {
+        let target_bit = self.resolve_bit(target);
+        let n = self.state.num_qubits();
+
+        if ctls.is_empty() {
+            dispatch::dispatch_single_qubit_gate(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                matrix,
+                target_bit,
+                n,
+            );
+        } else {
+            let control_mask = self.build_control_mask(ctls);
+            debug_assert_eq!(
+                control_mask & (1 << target_bit),
+                0,
+                "target qubit must not also be a control"
+            );
+            dispatch::dispatch_multi_controlled_gate(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                matrix,
+                target_bit,
+                control_mask,
+                n,
+            );
+        }
     }
 }
