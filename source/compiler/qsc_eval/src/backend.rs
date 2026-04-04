@@ -14,8 +14,14 @@ use qdk_simulators::noise_config::{CumulativeNoiseConfig, CumulativeNoiseTable};
 use rand::{Rng, RngCore};
 use rand::{SeedableRng, rngs::StdRng};
 
+#[cfg(feature = "gpu-sim")]
+use qdk_gpu_sim::GpuQuantumSim;
+
 #[cfg(test)]
 mod noise_tests;
+
+#[cfg(all(test, feature = "gpu-tests"))]
+mod dense_sim_tests;
 
 /// The trait that must be implemented by a quantum backend, whose functions will be invoked when
 /// quantum intrinsics are called.
@@ -1142,4 +1148,238 @@ fn unwrap_matrix_as_array2(matrix: Value, qubits: &[usize]) -> Array2<Complex<f6
     Array2::from_shape_fn((1 << qubits.len(), 1 << qubits.len()), |(i, j)| {
         matrix[i][j]
     })
+}
+
+/// Backend wrapper for the GPU dense state vector simulator.
+///
+/// Analogous to [`SparseSim`] but backed by [`GpuQuantumSim`] instead of
+/// [`QuantumSim`]. Noiseless only.
+#[cfg(feature = "gpu-sim")]
+pub struct DenseSim {
+    sim: GpuQuantumSim,
+}
+
+#[cfg(feature = "gpu-sim")]
+impl Default for DenseSim {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "gpu-sim")]
+impl DenseSim {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sim: GpuQuantumSim::new(None).expect("GPU simulator should initialize"),
+        }
+    }
+
+    #[must_use]
+    pub fn new_with_seed(seed: u64) -> Self {
+        Self {
+            sim: GpuQuantumSim::new(Some(seed)).expect("GPU simulator should initialize"),
+        }
+    }
+}
+
+#[cfg(feature = "gpu-sim")]
+impl Backend for DenseSim {
+    fn ccx(&mut self, ctl0: usize, ctl1: usize, q: usize) {
+        self.sim.mcx(&[ctl0, ctl1], q);
+    }
+
+    fn cx(&mut self, ctl: usize, q: usize) {
+        self.sim.mcx(&[ctl], q);
+    }
+
+    fn cy(&mut self, ctl: usize, q: usize) {
+        self.sim.mcy(&[ctl], q);
+    }
+
+    fn cz(&mut self, ctl: usize, q: usize) {
+        self.sim.mcz(&[ctl], q);
+    }
+
+    fn h(&mut self, q: usize) {
+        self.sim.h(q);
+    }
+
+    fn m(&mut self, q: usize) -> val::Result {
+        val::Result::Val(self.sim.measure(q))
+    }
+
+    fn mresetz(&mut self, q: usize) -> val::Result {
+        let res = self.sim.measure(q);
+        if res {
+            self.sim.x(q);
+        }
+        val::Result::Val(res)
+    }
+
+    fn reset(&mut self, q: usize) {
+        if self.sim.measure(q) {
+            self.sim.x(q);
+        }
+    }
+
+    fn rx(&mut self, theta: f64, q: usize) {
+        self.sim.rx(theta, q);
+    }
+
+    fn rxx(&mut self, theta: f64, q0: usize, q1: usize) {
+        self.sim.h(q0);
+        self.sim.h(q1);
+        self.sim.mcx(&[q1], q0);
+        self.sim.rz(theta, q0);
+        self.sim.mcx(&[q1], q0);
+        self.sim.h(q1);
+        self.sim.h(q0);
+    }
+
+    fn ry(&mut self, theta: f64, q: usize) {
+        self.sim.ry(theta, q);
+    }
+
+    fn ryy(&mut self, theta: f64, q0: usize, q1: usize) {
+        self.sim.h(q0);
+        self.sim.s(q0);
+        self.sim.h(q0);
+        self.sim.h(q1);
+        self.sim.s(q1);
+        self.sim.h(q1);
+        self.sim.mcx(&[q1], q0);
+        self.sim.rz(theta, q0);
+        self.sim.mcx(&[q1], q0);
+        self.sim.h(q1);
+        self.sim.sadj(q1);
+        self.sim.h(q1);
+        self.sim.h(q0);
+        self.sim.sadj(q0);
+        self.sim.h(q0);
+    }
+
+    fn rz(&mut self, theta: f64, q: usize) {
+        self.sim.rz(theta, q);
+    }
+
+    fn rzz(&mut self, theta: f64, q0: usize, q1: usize) {
+        self.sim.mcx(&[q1], q0);
+        self.sim.rz(theta, q0);
+        self.sim.mcx(&[q1], q0);
+    }
+
+    fn sadj(&mut self, q: usize) {
+        self.sim.sadj(q);
+    }
+
+    fn s(&mut self, q: usize) {
+        self.sim.s(q);
+    }
+
+    fn sx(&mut self, q: usize) {
+        self.sim.h(q);
+        self.sim.s(q);
+        self.sim.h(q);
+    }
+
+    fn swap(&mut self, q0: usize, q1: usize) {
+        self.sim.swap_qubit_ids(q0, q1);
+    }
+
+    fn tadj(&mut self, q: usize) {
+        self.sim.tadj(q);
+    }
+
+    fn t(&mut self, q: usize) {
+        self.sim.t(q);
+    }
+
+    fn x(&mut self, q: usize) {
+        self.sim.x(q);
+    }
+
+    fn y(&mut self, q: usize) {
+        self.sim.y(q);
+    }
+
+    fn z(&mut self, q: usize) {
+        self.sim.z(q);
+    }
+
+    fn qubit_allocate(&mut self) -> usize {
+        self.sim.allocate()
+    }
+
+    fn qubit_release(&mut self, q: usize) -> bool {
+        let was_zero = self.sim.qubit_is_zero(q);
+        self.sim.release(q);
+        was_zero
+    }
+
+    fn qubit_swap_id(&mut self, q0: usize, q1: usize) {
+        self.sim.swap_qubit_ids(q0, q1);
+    }
+
+    fn capture_quantum_state(&mut self) -> (Vec<(BigUint, Complex<f64>)>, usize) {
+        let (state, count) = self
+            .sim
+            .get_state()
+            .expect("GPU state readback should succeed");
+
+        let mut new_state = state
+            .into_iter()
+            .map(|(idx, val)| {
+                let mut new_idx = BigUint::default();
+                for i in 0..(count as u64) {
+                    if idx.bit((count as u64) - 1 - i) {
+                        new_idx.set_bit(i, true);
+                    }
+                }
+                (new_idx, val)
+            })
+            .collect::<Vec<_>>();
+        new_state.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        (new_state, count)
+    }
+
+    fn qubit_is_zero(&mut self, q: usize) -> bool {
+        self.sim.qubit_is_zero(q)
+    }
+
+    fn custom_intrinsic(&mut self, name: &str, arg: Value) -> Option<Result<Value, String>> {
+        match name {
+            "GlobalPhase" => {
+                let [ctls_val, theta] = &*arg.unwrap_tuple() else {
+                    panic!("tuple arity for GlobalPhase intrinsic should be 2");
+                };
+                let ctls = ctls_val
+                    .clone()
+                    .unwrap_array()
+                    .iter()
+                    .map(|q| q.clone().unwrap_qubit().deref().0)
+                    .collect::<Vec<_>>();
+                let q = self.sim.allocate();
+                self.sim
+                    .mcrz(&ctls, -2.0 * theta.clone().unwrap_double(), q);
+                self.sim.release(q);
+                Some(Ok(Value::unit()))
+            }
+            "BeginEstimateCaching" => Some(Ok(Value::Bool(true))),
+            "EndEstimateCaching"
+            | "AccountForEstimatesInternal"
+            | "BeginRepeatEstimatesInternal"
+            | "EndRepeatEstimatesInternal"
+            | "EnableMemoryComputeArchitecture" => Some(Ok(Value::unit())),
+            _ => None,
+        }
+    }
+
+    fn set_seed(&mut self, seed: Option<u64>) {
+        if let Some(seed) = seed {
+            self.sim.set_rng_seed(seed);
+        } else {
+            self.sim.set_rng_seed(rand::thread_rng().next_u64());
+        }
+    }
 }

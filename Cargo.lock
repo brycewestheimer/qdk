@@ -2228,6 +2228,7 @@ dependencies = [
  "num-bigint",
  "num-complex",
  "num-traits",
+ "qdk-gpu-sim",
  "qdk_simulators",
  "qsc_data_structures",
  "qsc_fir",

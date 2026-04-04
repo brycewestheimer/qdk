@@ -14,6 +14,7 @@ ndarray = { workspace = true }
 num-bigint = { workspace = true }
 num-complex = { workspace = true }
 num-traits = { workspace = true }
+qdk-gpu-sim = { path = "../../gpusim", optional = true }
 qdk_simulators =  { path = "../../simulators" }
 qsc_data_structures = { path = "../qsc_data_structures" }
 qsc_fir = { path = "../qsc_fir" }
@@ -22,6 +23,10 @@ qsc_lowerer = { path = "../qsc_lowerer" }
 rand =  { workspace = true }
 rustc-hash = { workspace = true }
 thiserror = { workspace = true }
+
+[features]
+gpu-sim = ["dep:qdk-gpu-sim"]
+gpu-tests = ["gpu-sim"]
 
 [dev-dependencies]
 expect-test = { workspace = true }
