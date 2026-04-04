@@ -24,6 +24,7 @@ log = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 approx = "0.5"
+quantum-sparse-sim = { workspace = true }
 
 [features]
 default = []

@@ -2064,6 +2064,7 @@ dependencies = [
  "num-bigint",
  "num-complex",
  "num-traits",
+ "quantum-sparse-sim",
  "rand 0.8.5",
  "rustc-hash",
  "thiserror 2.0.18",
