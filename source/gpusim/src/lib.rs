@@ -2,6 +2,7 @@ pub mod error;
 pub mod gates;
 pub mod gpu;
 pub mod measurement;
+pub mod precision;
 #[cfg(feature = "python")]
 mod python;
 pub mod qubit_map;
@@ -20,7 +21,13 @@ use crate::gpu::dispatch;
 use crate::gpu::pipeline::PipelineCache;
 use crate::gpu::state_buffer::StateBuffer;
 use crate::measurement::MeasurementEngine;
+use crate::precision::Precision;
 use crate::qubit_map::QubitMap;
+
+#[cfg(not(feature = "f64_emulation"))]
+type ActivePrecision = precision::F32Precision;
+#[cfg(feature = "f64_emulation")]
+type ActivePrecision = precision::F64EmulatedPrecision;
 
 /// A GPU-accelerated dense state vector quantum simulator.
 ///
@@ -50,6 +57,10 @@ impl GpuQuantumSim {
     ///   the RNG is seeded from system entropy.
     pub fn new(seed: Option<u64>) -> Result<Self, GpuSimError> {
         let gpu = GpuDevice::new()?;
+
+        #[cfg(feature = "f64_emulation")]
+        verify_fma_is_fused(gpu.device(), gpu.queue())?;
+
         let state = StateBuffer::new(&gpu)?;
         let pipelines = PipelineCache::new(gpu.device());
         let qubit_map = QubitMap::new();
@@ -317,7 +328,7 @@ impl GpuQuantumSim {
         }
 
         // Probabilistic case: sample from Born rule distribution.
-        let random: f32 = self.rng.r#gen();
+        let random: f64 = f64::from(self.rng.r#gen::<f32>());
         let result = random < p1;
 
         // Collapse: zero inconsistent amplitudes, renormalize consistent ones.
@@ -369,7 +380,7 @@ impl GpuQuantumSim {
             return true;
         }
 
-        let random: f32 = self.rng.r#gen();
+        let random: f64 = f64::from(self.rng.r#gen::<f32>());
         let result = random < p_odd;
 
         let probability = if result { p_odd } else { 1.0 - p_odd };
@@ -396,8 +407,7 @@ impl GpuQuantumSim {
         let measure_mask = self.build_measure_mask(ids);
         let num_qubits = self.state.num_qubits();
 
-        let p = self
-            .measurement_engine
+        self.measurement_engine
             .compute_probability(
                 self.gpu.device(),
                 self.gpu.queue(),
@@ -406,9 +416,7 @@ impl GpuQuantumSim {
                 measure_mask,
                 num_qubits,
             )
-            .expect("probability computation should succeed");
-
-        f64::from(p)
+            .expect("probability computation should succeed")
     }
 
     /// Returns `true` if the qubit is in the |0> state (within tolerance).
@@ -424,7 +432,7 @@ impl GpuQuantumSim {
         let measure_mask = 1u32 << bit;
         let num_qubits = self.state.num_qubits();
 
-        let p1 = self
+        let p1: f64 = self
             .measurement_engine
             .compute_probability(
                 self.gpu.device(),
@@ -491,16 +499,17 @@ impl GpuQuantumSim {
     /// (NOT internal bit position `k`). The permutation from internal bit
     /// positions to qubit IDs is computed from [`QubitMap::active_mappings`].
     pub fn get_state(&self) -> Result<(Vec<(BigUint, Complex64)>, usize), GpuSimError> {
-        let raw_amplitudes = self.state.readback(self.gpu.device(), self.gpu.queue())?;
+        let raw_floats = self.state.readback(self.gpu.device(), self.gpu.queue())?;
         let threshold = 1e-10_f64;
+        let floats_per_amp = ActivePrecision::FLOATS_PER_AMPLITUDE as usize;
 
         // Get the mapping: Vec<(bit_position, qubit_id)> for all active qubits.
         let active_mappings = self.qubit_map.active_mappings();
 
         let mut result: Vec<(BigUint, Complex64)> = Vec::new();
 
-        for (raw_idx, &(re, im)) in raw_amplitudes.iter().enumerate() {
-            let amplitude = Complex64::new(f64::from(re), f64::from(im));
+        for (raw_idx, chunk) in raw_floats.chunks_exact(floats_per_amp).enumerate() {
+            let amplitude = ActivePrecision::decode_complex(chunk);
             if amplitude.norm_sqr() <= threshold {
                 continue;
             }
@@ -554,10 +563,13 @@ impl GpuQuantumSim {
         self.gpu.adapter_info()
     }
 
-    /// Returns the maximum number of qubits that can be simulated at f32 precision.
+    /// Returns the maximum number of qubits that can be simulated.
+    ///
+    /// In f32 mode this is based on 8 bytes per amplitude. In f64 emulation
+    /// mode, each amplitude requires 16 bytes, reducing the maximum by ~1 qubit.
     #[must_use]
     pub fn max_qubits(&self) -> u32 {
-        self.gpu.max_qubits(8) // 8 bytes per f32 complex amplitude
+        self.gpu.max_qubits(ActivePrecision::BYTES_PER_AMPLITUDE)
     }
 
     /// Returns the RNG, primarily for testing.
@@ -652,4 +664,128 @@ impl GpuQuantumSim {
             );
         }
     }
+}
+
+/// Runtime FMA self-test: verifies that GPU `fma()` is truly fused.
+///
+/// DS multiplication relies on `fma(a, b, -a*b)` returning the exact rounding
+/// error. If the GPU decomposes `fma` into separate multiply+add, this error
+/// term becomes zero and f64 emulation degrades to f32 precision.
+///
+/// This test is called once during `GpuQuantumSim::new()` when `f64_emulation`
+/// is active. It logs a warning if `fma` is not fused but does not hard-fail.
+#[cfg(feature = "f64_emulation")]
+#[allow(clippy::too_many_lines)]
+fn verify_fma_is_fused(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<(), GpuSimError> {
+    const FMA_TEST_SHADER: &str = r"
+@group(0) @binding(0)
+var<storage, read_write> result: f32;
+
+@compute @workgroup_size(1)
+fn main() {
+    // 1.0 + 2^-23 (smallest value where (a*a) loses the low bit)
+    let a: f32 = 1.0 + 0.00000011920928955078125;
+    let p: f32 = a * a;
+    result = fma(a, a, -p);
+}
+";
+
+    let result_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fma_test_result"),
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fma_test_staging"),
+        size: 4,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("fma_test_shader"),
+        source: wgpu::ShaderSource::Wgsl(FMA_TEST_SHADER.into()),
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("fma_test_bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("fma_test_pl"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("fma_test_pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("fma_test_bg"),
+        layout: &bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: result_buffer.as_entire_binding(),
+        }],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("fma_test_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("fma_test_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&result_buffer, 0, &staging_buffer, 0, 4);
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let buffer_slice = staging_buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|_| GpuSimError::BufferMapFailed)?;
+    rx.recv()
+        .map_err(|_| GpuSimError::BufferMapFailed)?
+        .map_err(|e| GpuSimError::DeviceError(format!("FMA test readback failed: {e}")))?;
+
+    let data = buffer_slice.get_mapped_range();
+    let result_val = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    drop(data);
+    staging_buffer.unmap();
+
+    if result_val == 0.0 {
+        log::warn!(
+            "GPU fma() does not appear to be a true fused multiply-add. \
+             f64 emulation precision may be degraded to f32 levels."
+        );
+    } else {
+        log::info!("GPU fma() verified as true fused multiply-add (result: {result_val:e})");
+    }
+    Ok(())
 }

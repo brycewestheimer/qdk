@@ -1,3 +1,50 @@
+// Shader sources: conditionally compiled for f32 or f64 emulation mode.
+// In f64 mode, ds_math.wgsl is prepended to each f64 shader variant.
+#[cfg(not(feature = "f64_emulation"))]
+const SINGLE_QUBIT_SHADER: &str = include_str!("../shaders/single_qubit_gate.wgsl");
+#[cfg(feature = "f64_emulation")]
+const SINGLE_QUBIT_SHADER: &str = concat!(
+    include_str!("../shaders/ds_math.wgsl"),
+    "\n",
+    include_str!("../shaders/single_qubit_gate_f64.wgsl"),
+);
+
+#[cfg(not(feature = "f64_emulation"))]
+const TWO_QUBIT_SHADER: &str = include_str!("../shaders/two_qubit_gate.wgsl");
+#[cfg(feature = "f64_emulation")]
+const TWO_QUBIT_SHADER: &str = concat!(
+    include_str!("../shaders/ds_math.wgsl"),
+    "\n",
+    include_str!("../shaders/two_qubit_gate_f64.wgsl"),
+);
+
+#[cfg(not(feature = "f64_emulation"))]
+const MULTI_CONTROLLED_SHADER: &str = include_str!("../shaders/multi_controlled_gate.wgsl");
+#[cfg(feature = "f64_emulation")]
+const MULTI_CONTROLLED_SHADER: &str = concat!(
+    include_str!("../shaders/ds_math.wgsl"),
+    "\n",
+    include_str!("../shaders/multi_controlled_gate_f64.wgsl"),
+);
+
+#[cfg(not(feature = "f64_emulation"))]
+const MEASUREMENT_SHADER: &str = include_str!("../shaders/measurement.wgsl");
+#[cfg(feature = "f64_emulation")]
+const MEASUREMENT_SHADER: &str = concat!(
+    include_str!("../shaders/ds_math.wgsl"),
+    "\n",
+    include_str!("../shaders/measurement_f64.wgsl"),
+);
+
+#[cfg(not(feature = "f64_emulation"))]
+const COLLAPSE_SHADER: &str = include_str!("../shaders/collapse.wgsl");
+#[cfg(feature = "f64_emulation")]
+const COLLAPSE_SHADER: &str = concat!(
+    include_str!("../shaders/ds_math.wgsl"),
+    "\n",
+    include_str!("../shaders/collapse_f64.wgsl"),
+);
+
 /// Cached compute pipelines for gate and measurement operations.
 ///
 /// Gate kernels (single-qubit, two-qubit, multi-controlled) and the collapse
@@ -34,32 +81,27 @@ impl PipelineCache {
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn new(device: &wgpu::Device) -> Self {
-        // Load all WGSL shader sources (embedded at compile time)
-        let single_qubit_source = include_str!("../shaders/single_qubit_gate.wgsl");
-        let two_qubit_source = include_str!("../shaders/two_qubit_gate.wgsl");
-        let multi_controlled_source = include_str!("../shaders/multi_controlled_gate.wgsl");
-        let measurement_source = include_str!("../shaders/measurement.wgsl");
-        let collapse_source = include_str!("../shaders/collapse.wgsl");
-
+        // Compile WGSL shader modules from the module-level constants
+        // (which are conditionally defined for f32 or f64 emulation mode).
         let single_qubit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("single_qubit_gate"),
-            source: wgpu::ShaderSource::Wgsl(single_qubit_source.into()),
+            source: wgpu::ShaderSource::Wgsl(SINGLE_QUBIT_SHADER.into()),
         });
         let two_qubit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("two_qubit_gate"),
-            source: wgpu::ShaderSource::Wgsl(two_qubit_source.into()),
+            source: wgpu::ShaderSource::Wgsl(TWO_QUBIT_SHADER.into()),
         });
         let multi_controlled_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("multi_controlled_gate"),
-            source: wgpu::ShaderSource::Wgsl(multi_controlled_source.into()),
+            source: wgpu::ShaderSource::Wgsl(MULTI_CONTROLLED_SHADER.into()),
         });
         let measurement_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("measurement"),
-            source: wgpu::ShaderSource::Wgsl(measurement_source.into()),
+            source: wgpu::ShaderSource::Wgsl(MEASUREMENT_SHADER.into()),
         });
         let collapse_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("collapse"),
-            source: wgpu::ShaderSource::Wgsl(collapse_source.into()),
+            source: wgpu::ShaderSource::Wgsl(COLLAPSE_SHADER.into()),
         });
 
         // Gate/collapse layout: 2 bindings (rw storage + uniform)

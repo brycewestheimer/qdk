@@ -1,8 +1,9 @@
+use num_complex::Complex64;
+
+use crate::ActivePrecision;
 use crate::error::GpuSimError;
 use crate::gpu::device::GpuDevice;
-
-/// Bytes per complex amplitude at f32 precision: 2 x sizeof(f32) = 8.
-const BYTES_PER_AMPLITUDE: u64 = 8;
+use crate::precision::Precision;
 
 /// Default initial capacity: 4 qubits = 16 amplitudes = 128 bytes.
 const DEFAULT_INITIAL_QUBITS: u32 = 4;
@@ -37,10 +38,10 @@ impl StateBuffer {
     /// a larger state vector.
     pub fn new(gpu: &GpuDevice) -> Result<Self, GpuSimError> {
         let max_buffer_size = gpu.max_buffer_size();
-        let max_amplitudes = max_buffer_size / BYTES_PER_AMPLITUDE;
+        let max_amplitudes = max_buffer_size / ActivePrecision::BYTES_PER_AMPLITUDE;
 
         let initial_amplitudes = 1u64 << DEFAULT_INITIAL_QUBITS;
-        let initial_size = initial_amplitudes * BYTES_PER_AMPLITUDE;
+        let initial_size = initial_amplitudes * ActivePrecision::BYTES_PER_AMPLITUDE;
 
         let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("state_vector"),
@@ -103,7 +104,7 @@ impl StateBuffer {
         while new_capacity < required_amplitudes {
             new_capacity = new_capacity.saturating_mul(2).min(self.max_amplitudes);
         }
-        let new_size = new_capacity * BYTES_PER_AMPLITUDE;
+        let new_size = new_capacity * ActivePrecision::BYTES_PER_AMPLITUDE;
 
         self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("state_vector"),
@@ -135,29 +136,39 @@ impl StateBuffer {
         self.num_qubits = num_qubits;
         self.num_amplitudes = 1u64 << num_qubits;
 
-        // Build CPU-side state: |0...0> = [(1.0, 0.0), (0.0, 0.0), ...]
+        // Build CPU-side state: |0...0> = [(1.0+0.0i), (0.0+0.0i), ...]
+        // Use the active precision to encode the |0> amplitude correctly
+        // (f32: 8 bytes, f64-emulated: 16 bytes for the first amplitude).
         #[allow(clippy::cast_possible_truncation)]
-        let byte_count = (self.num_amplitudes * BYTES_PER_AMPLITUDE) as usize;
+        let byte_count = (self.num_amplitudes * ActivePrecision::BYTES_PER_AMPLITUDE) as usize;
         let mut data = vec![0u8; byte_count];
-        // Write 1.0f32 into the first 4 bytes (real part of amplitude 0)
-        data[..4].copy_from_slice(&1.0_f32.to_le_bytes());
+
+        let one_encoded = ActivePrecision::encode_complex(Complex64::new(1.0, 0.0));
+        for (i, &val) in one_encoded.iter().enumerate() {
+            let bytes = val.to_le_bytes();
+            data[i * 4..i * 4 + 4].copy_from_slice(&bytes);
+        }
+
         queue.write_buffer(&self.buffer, 0, &data);
     }
 
-    /// Copies the state vector from GPU to CPU and returns the amplitudes
-    /// as (re, im) pairs.
+    /// Copies the state vector from GPU to CPU and returns the raw f32 data.
+    ///
+    /// In f32 mode, each amplitude is 2 consecutive f32s (re, im).
+    /// In f64-emulated mode, each amplitude is 4 consecutive f32s
+    /// (`re_hi`, `re_lo`, `im_hi`, `im_lo`).
     ///
     /// Steps:
     /// 1. Copy from primary buffer to staging buffer (GPU-side).
     /// 2. Map the staging buffer for CPU read access.
-    /// 3. Read and convert the raw bytes to `(f32, f32)` pairs.
+    /// 3. Read the raw f32 values.
     /// 4. Unmap the staging buffer.
     pub fn readback(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Result<Vec<(f32, f32)>, GpuSimError> {
-        let active_size = self.num_amplitudes * BYTES_PER_AMPLITUDE;
+    ) -> Result<Vec<f32>, GpuSimError> {
+        let active_size = self.num_amplitudes * ActivePrecision::BYTES_PER_AMPLITUDE;
 
         // Step 1: GPU-side copy from primary to staging buffer
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -183,16 +194,13 @@ impl StateBuffer {
         // Step 3: Read the data
         let data = buffer_slice.get_mapped_range();
         let floats: &[f32] = bytemuck::cast_slice(&data);
-        let amplitudes: Vec<(f32, f32)> = floats
-            .chunks_exact(2)
-            .map(|chunk| (chunk[0], chunk[1]))
-            .collect();
+        let result = floats.to_vec();
 
         // Step 4: Unmap
         drop(data);
         self.staging_buffer.unmap();
 
-        Ok(amplitudes)
+        Ok(result)
     }
 
     /// Returns a reference to the primary state buffer for bind group creation.

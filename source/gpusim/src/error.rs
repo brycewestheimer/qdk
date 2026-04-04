@@ -30,4 +30,8 @@ pub enum GpuSimError {
     /// GPU buffer readback (map + copy) failed.
     #[error("GPU buffer readback failed")]
     BufferMapFailed,
+
+    /// A GPU device operation failed.
+    #[error("device error: {0}")]
+    DeviceError(String),
 }

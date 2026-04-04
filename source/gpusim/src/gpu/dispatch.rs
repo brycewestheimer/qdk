@@ -1,6 +1,8 @@
 use crate::gates::{Mat2x2, Mat4x4};
 use crate::gpu::pipeline::PipelineCache;
 use crate::gpu::state_buffer::StateBuffer;
+#[cfg(feature = "f64_emulation")]
+use crate::precision;
 
 /// GPU-side gate parameters matching the WGSL `GateParams` struct layout.
 ///
@@ -93,6 +95,106 @@ pub struct MultiControlledGateParams {
     _pad: u32,
 }
 
+/// GPU-side single-qubit gate params for f64 emulation mode.
+///
+/// Layout matches the f64 WGSL `GateParams` struct: header fields first,
+/// then the DS-encoded 2x2 matrix (16 f32s = 4 complex entries * 4 f32s).
+///
+/// Size: 80 bytes (16 header + 64 matrix).
+#[cfg(feature = "f64_emulation")]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GateParamsF64 {
+    pub target_bit: u32,
+    pub num_qubits: u32,
+    _pad0: u32,
+    _pad1: u32,
+    /// 2x2 complex matrix in DS format (4 entries, 4 f32s each).
+    pub matrix: [f32; 16],
+}
+
+/// GPU-side two-qubit gate params for f64 emulation mode.
+///
+/// Size: 272 bytes (16 header + 256 matrix).
+#[cfg(feature = "f64_emulation")]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TwoQubitGateParamsF64 {
+    pub bit_a: u32,
+    pub bit_b: u32,
+    pub num_qubits: u32,
+    _pad: u32,
+    /// 4x4 complex matrix in DS format (16 entries, 4 f32s each).
+    pub mat: [f32; 64],
+}
+
+/// GPU-side multi-controlled gate params for f64 emulation mode.
+///
+/// Size: 80 bytes (16 header + 64 matrix).
+#[cfg(feature = "f64_emulation")]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MultiControlledGateParamsF64 {
+    pub target_bit: u32,
+    pub num_qubits: u32,
+    pub control_mask: u32,
+    _pad: u32,
+    /// 2x2 complex matrix in DS format (4 entries, 4 f32s each).
+    pub matrix: [f32; 16],
+}
+
+/// GPU-side collapse params for f64 emulation mode.
+///
+/// Size: 32 bytes.
+#[cfg(feature = "f64_emulation")]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CollapseParamsF64 {
+    pub measure_mask: u32,
+    pub measured_value: u32,
+    pub num_qubits: u32,
+    #[allow(clippy::pub_underscore_fields)]
+    pub _pad: u32,
+    /// DS normalization factor (hi, lo).
+    pub norm_hi: f32,
+    pub norm_lo: f32,
+    #[allow(clippy::pub_underscore_fields)]
+    pub _pad2: u32,
+    #[allow(clippy::pub_underscore_fields)]
+    pub _pad3: u32,
+}
+
+/// Encode a `Mat2x2` (4 complex entries as `(f32, f32)` tuples) into DS format
+/// for GPU upload: 4 entries * 4 f32s (`re_hi`, `re_lo`, `im_hi`, `im_lo`) = 16 f32s.
+#[cfg(feature = "f64_emulation")]
+fn encode_2x2_ds(gate: &Mat2x2) -> [f32; 16] {
+    let mut out = [0.0f32; 16];
+    for (i, &(re, im)) in gate.iter().enumerate() {
+        let (re_hi, re_lo) = precision::to_ds(f64::from(re));
+        let (im_hi, im_lo) = precision::to_ds(f64::from(im));
+        out[i * 4] = re_hi;
+        out[i * 4 + 1] = re_lo;
+        out[i * 4 + 2] = im_hi;
+        out[i * 4 + 3] = im_lo;
+    }
+    out
+}
+
+/// Encode a `Mat4x4` (16 complex entries) into DS format for GPU upload: 64 f32s.
+#[cfg(feature = "f64_emulation")]
+fn encode_4x4_ds(gate: &Mat4x4) -> [f32; 64] {
+    let mut out = [0.0f32; 64];
+    for (i, &(re, im)) in gate.iter().enumerate() {
+        let (re_hi, re_lo) = precision::to_ds(f64::from(re));
+        let (im_hi, im_lo) = precision::to_ds(f64::from(im));
+        out[i * 4] = re_hi;
+        out[i * 4 + 1] = re_lo;
+        out[i * 4 + 2] = im_hi;
+        out[i * 4 + 3] = im_lo;
+    }
+    out
+}
+
 /// Dispatches a single-qubit gate operation to the GPU.
 ///
 /// This creates a transient uniform buffer for the gate parameters,
@@ -110,28 +212,50 @@ pub fn dispatch_single_qubit_gate(
     target_bit: u32,
     num_qubits: u32,
 ) {
-    let params = GateParams {
-        gate_re0: gate[0].0,
-        gate_im0: gate[0].1,
-        gate_re1: gate[1].0,
-        gate_im1: gate[1].1,
-        gate_re2: gate[2].0,
-        gate_im2: gate[2].1,
-        gate_re3: gate[3].0,
-        gate_im3: gate[3].1,
-        target_bit,
-        num_qubits,
-        _pad0: 0,
-        _pad1: 0,
+    #[cfg(not(feature = "f64_emulation"))]
+    let param_buffer = {
+        let params = GateParams {
+            gate_re0: gate[0].0,
+            gate_im0: gate[0].1,
+            gate_re1: gate[1].0,
+            gate_im1: gate[1].1,
+            gate_re2: gate[2].0,
+            gate_im2: gate[2].1,
+            gate_re3: gate[3].0,
+            gate_im3: gate[3].1,
+            target_bit,
+            num_qubits,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gate_params"),
+            size: std::mem::size_of::<GateParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
+        buf
     };
 
-    let param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("gate_params"),
-        size: std::mem::size_of::<GateParams>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&param_buffer, 0, bytemuck::bytes_of(&params));
+    #[cfg(feature = "f64_emulation")]
+    let param_buffer = {
+        let params = GateParamsF64 {
+            target_bit,
+            num_qubits,
+            _pad0: 0,
+            _pad1: 0,
+            matrix: encode_2x2_ds(gate),
+        };
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gate_params"),
+            size: std::mem::size_of::<GateParamsF64>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
+        buf
+    };
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("gate_bind_group"),
@@ -194,28 +318,49 @@ pub fn dispatch_two_qubit_gate(
         "need at least 2 qubits for a two-qubit gate"
     );
 
-    // Flatten Mat4x4 [(f32, f32); 16] to [f32; 32]
-    let mut mat = [0.0f32; 32];
-    for (i, &(re, im)) in gate.iter().enumerate() {
-        mat[i * 2] = re;
-        mat[i * 2 + 1] = im;
-    }
-
-    let params = TwoQubitGateParams {
-        mat,
-        bit_a,
-        bit_b,
-        num_qubits,
-        _pad: 0,
+    #[cfg(not(feature = "f64_emulation"))]
+    let param_buffer = {
+        // Flatten Mat4x4 [(f32, f32); 16] to [f32; 32]
+        let mut mat = [0.0f32; 32];
+        for (i, &(re, im)) in gate.iter().enumerate() {
+            mat[i * 2] = re;
+            mat[i * 2 + 1] = im;
+        }
+        let params = TwoQubitGateParams {
+            mat,
+            bit_a,
+            bit_b,
+            num_qubits,
+            _pad: 0,
+        };
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("two_qubit_params"),
+            size: std::mem::size_of::<TwoQubitGateParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
+        buf
     };
 
-    let param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("two_qubit_params"),
-        size: std::mem::size_of::<TwoQubitGateParams>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&param_buffer, 0, bytemuck::bytes_of(&params));
+    #[cfg(feature = "f64_emulation")]
+    let param_buffer = {
+        let params = TwoQubitGateParamsF64 {
+            bit_a,
+            bit_b,
+            num_qubits,
+            _pad: 0,
+            mat: encode_4x4_ds(gate),
+        };
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("two_qubit_params"),
+            size: std::mem::size_of::<TwoQubitGateParamsF64>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
+        buf
+    };
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("two_qubit_bind_group"),
@@ -276,28 +421,50 @@ pub fn dispatch_multi_controlled_gate(
         "target_bit must not be set in control_mask"
     );
 
-    let params = MultiControlledGateParams {
-        mat_a_re: gate[0].0,
-        mat_a_im: gate[0].1,
-        mat_b_re: gate[1].0,
-        mat_b_im: gate[1].1,
-        mat_c_re: gate[2].0,
-        mat_c_im: gate[2].1,
-        mat_d_re: gate[3].0,
-        mat_d_im: gate[3].1,
-        target_bit,
-        num_qubits,
-        control_mask,
-        _pad: 0,
+    #[cfg(not(feature = "f64_emulation"))]
+    let param_buffer = {
+        let params = MultiControlledGateParams {
+            mat_a_re: gate[0].0,
+            mat_a_im: gate[0].1,
+            mat_b_re: gate[1].0,
+            mat_b_im: gate[1].1,
+            mat_c_re: gate[2].0,
+            mat_c_im: gate[2].1,
+            mat_d_re: gate[3].0,
+            mat_d_im: gate[3].1,
+            target_bit,
+            num_qubits,
+            control_mask,
+            _pad: 0,
+        };
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("multi_controlled_params"),
+            size: std::mem::size_of::<MultiControlledGateParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
+        buf
     };
 
-    let param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("multi_controlled_params"),
-        size: std::mem::size_of::<MultiControlledGateParams>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&param_buffer, 0, bytemuck::bytes_of(&params));
+    #[cfg(feature = "f64_emulation")]
+    let param_buffer = {
+        let params = MultiControlledGateParamsF64 {
+            target_bit,
+            num_qubits,
+            control_mask,
+            _pad: 0,
+            matrix: encode_2x2_ds(gate),
+        };
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("multi_controlled_params"),
+            size: std::mem::size_of::<MultiControlledGateParamsF64>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
+        buf
+    };
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("multi_controlled_bind_group"),
@@ -370,6 +537,15 @@ pub struct CollapseParams {
 
 const _: () = assert!(std::mem::size_of::<MeasureParams>() == 16);
 const _: () = assert!(std::mem::size_of::<CollapseParams>() == 16);
+
+#[cfg(feature = "f64_emulation")]
+const _: () = assert!(std::mem::size_of::<GateParamsF64>() == 80);
+#[cfg(feature = "f64_emulation")]
+const _: () = assert!(std::mem::size_of::<TwoQubitGateParamsF64>() == 272);
+#[cfg(feature = "f64_emulation")]
+const _: () = assert!(std::mem::size_of::<MultiControlledGateParamsF64>() == 80);
+#[cfg(feature = "f64_emulation")]
+const _: () = assert!(std::mem::size_of::<CollapseParamsF64>() == 32);
 
 #[cfg(test)]
 mod tests {
