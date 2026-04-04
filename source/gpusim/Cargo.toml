@@ -1,0 +1,38 @@
+[package]
+name = "qdk-gpu-sim"
+description = "GPU-accelerated dense state vector quantum simulator using wgpu compute shaders"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wgpu = { workspace = true }
+futures = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+num-complex = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+rand = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+approx = "0.5"
+
+[features]
+default = []
+gpu-tests = []
+f64_emulation = []
+python = []
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
