@@ -37,3 +37,15 @@ workspace = true
 
 [lib]
 doctest = false
+
+[[bench]]
+name = "single_gate"
+harness = false
+
+[[bench]]
+name = "circuit"
+harness = false
+
+[[bench]]
+name = "measurement"
+harness = false
