@@ -45,6 +45,16 @@ const QUBIT_ZERO_THRESHOLD: f64 = 1e-6;
 /// from the sparse state representation returned by `get_state()`.
 const AMPLITUDE_FILTER_THRESHOLD: f64 = 1e-10;
 
+/// Size of the pre-allocated uniform buffer for gate parameters.
+///
+/// Must be at least as large as the largest param struct:
+/// - f32 mode: `TwoQubitGateParams` = 144 bytes
+/// - `f64_emulation` mode: `TwoQubitGateParamsF64` = 272 bytes
+///
+/// We use the `f64_emulation` maximum unconditionally to keep the logic simple.
+/// 272 bytes rounded to 16-byte alignment = 272 (already aligned).
+const PARAM_BUFFER_SIZE: u64 = 272;
+
 #[cfg(not(feature = "f64_emulation"))]
 type ActivePrecision = precision::F32Precision;
 #[cfg(feature = "f64_emulation")]
@@ -65,6 +75,9 @@ pub struct GpuQuantumSim {
     qubit_map: QubitMap,
     rng: StdRng,
     measurement_engine: MeasurementEngine,
+    /// Pre-allocated uniform buffer for gate parameters.
+    /// Sized to the largest param struct to avoid per-gate allocation.
+    param_buffer: wgpu::Buffer,
 }
 
 impl GpuQuantumSim {
@@ -91,6 +104,14 @@ impl GpuQuantumSim {
         };
         let measurement_engine =
             MeasurementEngine::new(gpu.device(), measurement::MAX_MEASUREMENT_WORKGROUPS);
+
+        let param_buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gate_param_pool"),
+            size: PARAM_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Ok(Self {
             gpu,
             state,
@@ -98,6 +119,7 @@ impl GpuQuantumSim {
             qubit_map,
             rng,
             measurement_engine,
+            param_buffer,
         })
     }
 
@@ -106,14 +128,19 @@ impl GpuQuantumSim {
     /// The first call initializes the state vector to |0>. Subsequent calls
     /// grow the state vector by one qubit (in the |0> state), preserving
     /// existing quantum state via GPU buffer copy.
-    pub fn allocate(&mut self) -> usize {
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuSimError::TooManyQubits` if the GPU cannot hold the
+    /// required state vector.
+    pub fn allocate(&mut self) -> Result<usize, GpuSimError> {
         let id = self.qubit_map.allocate();
 
         match self.qubit_map.max_bit() {
             None => {
                 // This shouldn't happen -- we just allocated, so max_bit >= Some(0).
                 // But handle defensively.
-                id
+                Ok(id)
             }
             Some(max_bit) => {
                 #[allow(clippy::cast_possible_truncation)]
@@ -121,18 +148,19 @@ impl GpuQuantumSim {
                 if self.state.num_qubits() == 0 {
                     // First allocation: initialize to |0...0>.
                     self.state
-                        .ensure_capacity(self.gpu.device(), required_qubits)
-                        .expect("GPU should have capacity for requested qubits");
-                    self.state.initialize(self.gpu.queue(), required_qubits);
+                        .ensure_capacity(self.gpu.device(), required_qubits)?;
+                    self.state.initialize(self.gpu.device(), required_qubits);
                 } else if required_qubits > self.state.num_qubits() {
                     // Growth: preserve existing state, tensor in |0> for new qubit.
-                    self.state
-                        .grow_preserving_state(self.gpu.device(), self.gpu.queue(), required_qubits)
-                        .expect("GPU should have capacity for requested qubits");
+                    self.state.grow_preserving_state(
+                        self.gpu.device(),
+                        self.gpu.queue(),
+                        required_qubits,
+                    )?;
                 }
                 // If required_qubits <= num_qubits, a recycled bit position is being
                 // reused and no buffer growth is needed.
-                id
+                Ok(id)
             }
         }
     }
@@ -210,6 +238,7 @@ impl GpuQuantumSim {
                 &crate::gates::rx_f64(theta),
                 bit,
                 self.state.num_qubits(),
+                &self.param_buffer,
             );
         }
     }
@@ -230,6 +259,7 @@ impl GpuQuantumSim {
                 &crate::gates::ry_f64(theta),
                 bit,
                 self.state.num_qubits(),
+                &self.param_buffer,
             );
         }
     }
@@ -250,6 +280,7 @@ impl GpuQuantumSim {
                 &crate::gates::rz_f64(theta),
                 bit,
                 self.state.num_qubits(),
+                &self.param_buffer,
             );
         }
     }
@@ -350,6 +381,7 @@ impl GpuQuantumSim {
             bit_a,
             bit_b,
             self.state.num_qubits(),
+            &self.param_buffer,
         );
     }
 
@@ -391,7 +423,11 @@ impl GpuQuantumSim {
     ///    - `P > 1 - DETERMINISTIC_THRESHOLD`: outcome is |1> (deterministic).
     ///    - Otherwise: sample from Born rule distribution using the RNG.
     /// 4. Dispatch the collapse shader to project and renormalize the state.
-    pub fn measure(&mut self, id: usize) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GpuSimError` if the probability readback fails.
+    pub fn measure(&mut self, id: usize) -> Result<bool, GpuSimError> {
         let bit = self
             .qubit_map
             .bit_position(id)
@@ -400,17 +436,14 @@ impl GpuQuantumSim {
         let measure_mask = 1u32 << bit;
         let num_qubits = self.state.num_qubits();
 
-        let p1 = self
-            .measurement_engine
-            .compute_probability(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
-                &self.state,
-                measure_mask,
-                num_qubits,
-            )
-            .expect("probability computation should succeed");
+        let p1 = self.measurement_engine.compute_probability(
+            self.gpu.device(),
+            self.gpu.queue(),
+            &self.pipelines,
+            &self.state,
+            measure_mask,
+            num_qubits,
+        )?;
 
         // Determine outcome. For deterministic cases, we still dispatch collapse
         // to ensure the state vector is properly projected and normalized.
@@ -437,7 +470,7 @@ impl GpuQuantumSim {
             num_qubits,
         );
 
-        result
+        Ok(result)
     }
 
     /// Performs a joint parity measurement on multiple qubits.
@@ -451,21 +484,21 @@ impl GpuQuantumSim {
     /// The parity is defined as: for basis state |i>, the parity of the measured
     /// qubits is `countOneBits(i & measure_mask) mod 2`. If odd, it contributes
     /// to `P(odd parity)`.
-    pub fn joint_measure(&mut self, ids: &[usize]) -> bool {
+    /// # Errors
+    ///
+    /// Returns a `GpuSimError` if the probability readback fails.
+    pub fn joint_measure(&mut self, ids: &[usize]) -> Result<bool, GpuSimError> {
         let measure_mask = self.build_measure_mask(ids);
         let num_qubits = self.state.num_qubits();
 
-        let p_odd = self
-            .measurement_engine
-            .compute_probability(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
-                &self.state,
-                measure_mask,
-                num_qubits,
-            )
-            .expect("probability computation should succeed");
+        let p_odd = self.measurement_engine.compute_probability(
+            self.gpu.device(),
+            self.gpu.queue(),
+            &self.pipelines,
+            &self.state,
+            measure_mask,
+            num_qubits,
+        )?;
 
         let result = if p_odd < DETERMINISTIC_THRESHOLD {
             false
@@ -488,7 +521,7 @@ impl GpuQuantumSim {
             num_qubits,
         );
 
-        result
+        Ok(result)
     }
 
     /// Computes the probability of a joint measurement yielding odd parity,
@@ -496,27 +529,33 @@ impl GpuQuantumSim {
     ///
     /// Returns `f64` for API compatibility with `QuantumSim`, even though
     /// the internal computation uses f32.
-    pub fn joint_probability(&mut self, ids: &[usize]) -> f64 {
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GpuSimError` if the probability readback fails.
+    pub fn joint_probability(&mut self, ids: &[usize]) -> Result<f64, GpuSimError> {
         let measure_mask = self.build_measure_mask(ids);
         let num_qubits = self.state.num_qubits();
 
-        self.measurement_engine
-            .compute_probability(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
-                &self.state,
-                measure_mask,
-                num_qubits,
-            )
-            .expect("probability computation should succeed")
+        self.measurement_engine.compute_probability(
+            self.gpu.device(),
+            self.gpu.queue(),
+            &self.pipelines,
+            &self.state,
+            measure_mask,
+            num_qubits,
+        )
     }
 
     /// Returns `true` if the qubit is in the |0> state (within tolerance).
     ///
     /// Computes `P(qubit = |1>)` and checks if it is below
     /// [`QUBIT_ZERO_THRESHOLD`]. Does NOT collapse the state.
-    pub fn qubit_is_zero(&mut self, id: usize) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GpuSimError` if the probability readback fails.
+    pub fn qubit_is_zero(&mut self, id: usize) -> Result<bool, GpuSimError> {
         let bit = self
             .qubit_map
             .bit_position(id)
@@ -525,19 +564,16 @@ impl GpuQuantumSim {
         let measure_mask = 1u32 << bit;
         let num_qubits = self.state.num_qubits();
 
-        let p1: f64 = self
-            .measurement_engine
-            .compute_probability(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
-                &self.state,
-                measure_mask,
-                num_qubits,
-            )
-            .expect("probability computation should succeed");
+        let p1: f64 = self.measurement_engine.compute_probability(
+            self.gpu.device(),
+            self.gpu.queue(),
+            &self.pipelines,
+            &self.state,
+            measure_mask,
+            num_qubits,
+        )?;
 
-        p1 < QUBIT_ZERO_THRESHOLD
+        Ok(p1 < QUBIT_ZERO_THRESHOLD)
     }
 
     // ========================================================================
@@ -551,12 +587,21 @@ impl GpuQuantumSim {
     ///
     /// Release does NOT shrink the state vector. The dense simulator's state
     /// vector only grows; released bit positions become semantically inactive.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal measurement fails due to a GPU error. A failed
+    /// release leaves the simulator in an inconsistent state, so there is no
+    /// meaningful recovery path.
     pub fn release(&mut self, id: usize) {
         // Always measure and reset. This is simpler and more correct than the
         // previous approach of checking qubit_is_zero() first, because:
         // 1. It avoids a semantic inconsistency where |0> qubits skip collapse.
         // 2. The cost of one extra GPU dispatch is negligible for correctness.
-        if self.measure(id) {
+        if self
+            .measure(id)
+            .expect("measure should succeed during release")
+        {
             self.x(id);
         }
         self.qubit_map
@@ -671,6 +716,16 @@ impl GpuQuantumSim {
         &self.rng
     }
 
+    /// Synchronously waits for all submitted GPU work to complete.
+    ///
+    /// This is a no-op in terms of simulator state, but ensures that all
+    /// previously submitted commands have finished executing on the GPU.
+    /// Primarily used in benchmarks to measure actual GPU execution time
+    /// rather than just command submission latency.
+    pub fn sync_gpu(&self) {
+        let _ = self.gpu.device().poll(wgpu::PollType::wait_indefinitely());
+    }
+
     // ========================================================================
     // Internal dispatch helpers
     // ========================================================================
@@ -696,6 +751,7 @@ impl GpuQuantumSim {
             matrix,
             bit,
             self.state.num_qubits(),
+            &self.param_buffer,
         );
     }
 
@@ -737,6 +793,7 @@ impl GpuQuantumSim {
                 matrix,
                 target_bit,
                 n,
+                &self.param_buffer,
             );
         } else {
             let control_mask = self.build_control_mask(ctls);
@@ -754,6 +811,7 @@ impl GpuQuantumSim {
                 target_bit,
                 control_mask,
                 n,
+                &self.param_buffer,
             );
         }
     }
@@ -781,6 +839,7 @@ impl GpuQuantumSim {
                 matrix,
                 target_bit,
                 n,
+                &self.param_buffer,
             );
         } else {
             let control_mask = self.build_control_mask(ctls);
@@ -798,6 +857,7 @@ impl GpuQuantumSim {
                 target_bit,
                 control_mask,
                 n,
+                &self.param_buffer,
             );
         }
     }
@@ -810,7 +870,7 @@ impl GpuQuantumSim {
 /// term becomes zero and f64 emulation degrades to f32 precision.
 ///
 /// This test is called once during `GpuQuantumSim::new()` when `f64_emulation`
-/// is active. It logs a warning if `fma` is not fused but does not hard-fail.
+/// is active. Returns `Err(GpuSimError::FmaNotFused)` if `fma` is not fused.
 #[cfg(feature = "f64_emulation")]
 #[allow(clippy::too_many_lines)]
 fn verify_fma_is_fused(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<(), GpuSimError> {
@@ -906,9 +966,9 @@ fn main() {
     });
     device
         .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|_| GpuSimError::BufferMapFailed)?;
+        .map_err(|e| GpuSimError::DevicePollFailed(format!("FMA test poll: {e}")))?;
     rx.recv()
-        .map_err(|_| GpuSimError::BufferMapFailed)?
+        .map_err(|_| GpuSimError::ChannelDisconnected)?
         .map_err(|e| GpuSimError::DeviceError(format!("FMA test readback failed: {e}")))?;
 
     let data = buffer_slice.get_mapped_range();
@@ -917,12 +977,9 @@ fn main() {
     staging_buffer.unmap();
 
     if result_val == 0.0 {
-        log::warn!(
-            "GPU fma() does not appear to be a true fused multiply-add. \
-             f64 emulation precision may be degraded to f32 levels."
-        );
-    } else {
-        log::info!("GPU fma() verified as true fused multiply-add (result: {result_val:e})");
+        return Err(GpuSimError::FmaNotFused);
     }
+
+    log::info!("GPU fma() verified as true fused multiply-add (result: {result_val:e})");
     Ok(())
 }

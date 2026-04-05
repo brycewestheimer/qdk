@@ -72,7 +72,9 @@ pub fn run_on_gpu(circuit: &TestCircuit) -> (Vec<(BigUint, Complex64)>, usize) {
     use qdk_gpu_sim::GpuQuantumSim;
 
     let mut sim = GpuQuantumSim::new(None).expect("GPU simulator should initialize");
-    let mut qubit_ids: Vec<usize> = (0..circuit.num_qubits).map(|_| sim.allocate()).collect();
+    let mut qubit_ids: Vec<usize> = (0..circuit.num_qubits)
+        .map(|_| sim.allocate().expect("allocation should succeed"))
+        .collect();
 
     for gate in &circuit.gates {
         match gate {
@@ -106,7 +108,7 @@ pub fn run_on_gpu(circuit: &TestCircuit) -> (Vec<(BigUint, Complex64)>, usize) {
                 sim.mcz(&ctrl_ids, qubit_ids[*t]);
             }
             TestGate::Allocate => {
-                qubit_ids.push(sim.allocate());
+                qubit_ids.push(sim.allocate().expect("allocation should succeed"));
             }
             TestGate::Release(q) => sim.release(qubit_ids[*q]),
         }

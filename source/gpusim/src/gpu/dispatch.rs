@@ -234,6 +234,7 @@ fn capped_workgroup_count(num_items: u64) -> u32 {
 /// The state vector is modified in-place on the GPU. No CPU synchronization
 /// occurs -- the operation is fully asynchronous from the CPU's perspective,
 /// but wgpu ensures sequential execution of submitted commands.
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_single_qubit_gate(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -242,12 +243,13 @@ pub fn dispatch_single_qubit_gate(
     gate: &Mat2x2,
     target_bit: u32,
     num_qubits: u32,
+    param_buffer: &wgpu::Buffer,
 ) {
     let num_pairs = 1u64 << (num_qubits - 1);
     let workgroup_count = capped_workgroup_count(num_pairs);
 
     #[cfg(not(feature = "f64_emulation"))]
-    let param_buffer = {
+    {
         let params = GateParams {
             gate_re0: gate[0].0,
             gate_im0: gate[0].1,
@@ -262,18 +264,11 @@ pub fn dispatch_single_qubit_gate(
             num_workgroups: workgroup_count,
             _pad: 0,
         };
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gate_params"),
-            size: std::mem::size_of::<GateParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
-        buf
-    };
+        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+    }
 
     #[cfg(feature = "f64_emulation")]
-    let param_buffer = {
+    {
         let params = GateParamsF64 {
             target_bit,
             num_qubits,
@@ -281,15 +276,8 @@ pub fn dispatch_single_qubit_gate(
             _pad: 0,
             matrix: encode_2x2_ds(gate),
         };
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gate_params"),
-            size: std::mem::size_of::<GateParamsF64>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
-        buf
-    };
+        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+    }
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("gate_bind_group"),
@@ -340,6 +328,7 @@ pub fn dispatch_two_qubit_gate(
     bit_a: u32,
     bit_b: u32,
     num_qubits: u32,
+    param_buffer: &wgpu::Buffer,
 ) {
     assert_ne!(bit_a, bit_b, "two-qubit gate requires distinct qubits");
     assert!(
@@ -351,7 +340,7 @@ pub fn dispatch_two_qubit_gate(
     let workgroup_count = capped_workgroup_count(num_groups);
 
     #[cfg(not(feature = "f64_emulation"))]
-    let param_buffer = {
+    {
         // Flatten Mat4x4 [(f32, f32); 16] to [[f32; 4]; 8] (vec4-packed)
         let mut flat = [0.0f32; 32];
         for (i, &(re, im)) in gate.iter().enumerate() {
@@ -370,18 +359,11 @@ pub fn dispatch_two_qubit_gate(
             num_qubits,
             num_workgroups: workgroup_count,
         };
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("two_qubit_params"),
-            size: std::mem::size_of::<TwoQubitGateParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
-        buf
-    };
+        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+    }
 
     #[cfg(feature = "f64_emulation")]
-    let param_buffer = {
+    {
         let params = TwoQubitGateParamsF64 {
             bit_a,
             bit_b,
@@ -389,15 +371,8 @@ pub fn dispatch_two_qubit_gate(
             num_workgroups: workgroup_count,
             mat: encode_4x4_ds(gate),
         };
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("two_qubit_params"),
-            size: std::mem::size_of::<TwoQubitGateParamsF64>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
-        buf
-    };
+        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+    }
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("two_qubit_bind_group"),
@@ -446,6 +421,7 @@ pub fn dispatch_multi_controlled_gate(
     target_bit: u32,
     control_mask: u32,
     num_qubits: u32,
+    param_buffer: &wgpu::Buffer,
 ) {
     assert_eq!(
         control_mask & (1 << target_bit),
@@ -457,7 +433,7 @@ pub fn dispatch_multi_controlled_gate(
     let workgroup_count = capped_workgroup_count(num_pairs);
 
     #[cfg(not(feature = "f64_emulation"))]
-    let param_buffer = {
+    {
         let params = MultiControlledGateParams {
             mat_a_re: gate[0].0,
             mat_a_im: gate[0].1,
@@ -472,18 +448,11 @@ pub fn dispatch_multi_controlled_gate(
             control_mask,
             num_workgroups: workgroup_count,
         };
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("multi_controlled_params"),
-            size: std::mem::size_of::<MultiControlledGateParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
-        buf
-    };
+        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+    }
 
     #[cfg(feature = "f64_emulation")]
-    let param_buffer = {
+    {
         let params = MultiControlledGateParamsF64 {
             target_bit,
             num_qubits,
@@ -491,15 +460,8 @@ pub fn dispatch_multi_controlled_gate(
             num_workgroups: workgroup_count,
             matrix: encode_2x2_ds(gate),
         };
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("multi_controlled_params"),
-            size: std::mem::size_of::<MultiControlledGateParamsF64>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buf, 0, bytemuck::bytes_of(&params));
-        buf
-    };
+        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+    }
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("multi_controlled_bind_group"),
@@ -537,6 +499,7 @@ pub fn dispatch_multi_controlled_gate(
 /// It accepts a `Mat2x2F64` (f64 complex entries) and encodes them directly
 /// to DS format via [`encode_2x2_ds_f64`], bypassing f32 intermediates.
 #[cfg(feature = "f64_emulation")]
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_single_qubit_gate_f64(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -545,6 +508,7 @@ pub fn dispatch_single_qubit_gate_f64(
     gate: &crate::gates::Mat2x2F64,
     target_bit: u32,
     num_qubits: u32,
+    param_buffer: &wgpu::Buffer,
 ) {
     let num_pairs = 1u64 << (num_qubits - 1);
     let workgroup_count = capped_workgroup_count(num_pairs);
@@ -556,13 +520,7 @@ pub fn dispatch_single_qubit_gate_f64(
         _pad: 0,
         matrix: encode_2x2_ds_f64(gate),
     };
-    let param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("gate_params"),
-        size: std::mem::size_of::<GateParamsF64>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&param_buffer, 0, bytemuck::bytes_of(&params));
+    queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("gate_bind_group"),
@@ -612,6 +570,7 @@ pub fn dispatch_multi_controlled_gate_f64(
     target_bit: u32,
     control_mask: u32,
     num_qubits: u32,
+    param_buffer: &wgpu::Buffer,
 ) {
     assert_eq!(
         control_mask & (1 << target_bit),
@@ -629,13 +588,7 @@ pub fn dispatch_multi_controlled_gate_f64(
         num_workgroups: workgroup_count,
         matrix: encode_2x2_ds_f64(gate),
     };
-    let param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("multi_controlled_params"),
-        size: std::mem::size_of::<MultiControlledGateParamsF64>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&param_buffer, 0, bytemuck::bytes_of(&params));
+    queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("multi_controlled_bind_group"),

@@ -23,8 +23,8 @@ fn ds_roundtrip_on_cpu() {
 #[test]
 fn f64_emulated_bell_state_precision() {
     let mut sim = GpuQuantumSim::new(Some(42)).expect("GPU init failed");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
 
     sim.h(q0);
     sim.mcx(&[q0], q1);
@@ -52,7 +52,7 @@ fn f64_emulated_deep_circuit_fidelity() {
     let mut sim = GpuQuantumSim::new(Some(42)).expect("GPU init failed");
     let mut qubits = Vec::new();
     for _ in 0..4 {
-        qubits.push(sim.allocate());
+        qubits.push(sim.allocate().expect("allocation should succeed"));
     }
 
     // Apply a deep sequence of gates.
@@ -86,7 +86,7 @@ fn f64_emulated_deep_circuit_fidelity() {
 fn f64_emulated_state_readback_encoding() {
     // Verify that get_state() correctly reconstructs Complex64 from DS pairs.
     let mut sim = GpuQuantumSim::new(Some(42)).expect("GPU init failed");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
 
     // After allocating one qubit with no gates, state should be exactly |0>.
     let (state, _) = sim.get_state().expect("get_state failed");

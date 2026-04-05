@@ -27,11 +27,52 @@ pub enum GpuSimError {
     #[error("requested {requested} qubits but GPU supports at most {max}")]
     TooManyQubits { requested: u32, max: u32 },
 
-    /// GPU buffer readback (map + copy) failed.
-    #[error("GPU buffer readback failed")]
-    BufferMapFailed,
+    /// `device.poll()` failed during buffer readback.
+    #[error("GPU device poll failed: {0}")]
+    DevicePollFailed(String),
+
+    /// The buffer mapping request was rejected by the GPU driver.
+    #[error("GPU buffer map rejected: {0}")]
+    BufferMapRejected(String),
+
+    /// The channel used to receive the buffer mapping result was disconnected.
+    #[error("buffer map notification channel disconnected")]
+    ChannelDisconnected,
 
     /// A GPU device operation failed.
     #[error("device error: {0}")]
     DeviceError(String),
+
+    /// The GPU's `fma()` intrinsic is not a true fused multiply-add.
+    ///
+    /// f64 emulation via double-single arithmetic requires hardware FMA to
+    /// compute rounding errors. Without it, precision degrades to f32 levels.
+    #[cfg(feature = "f64_emulation")]
+    #[error(
+        "GPU fma() is not a true fused multiply-add; \
+         f64 emulation would degrade to f32 precision"
+    )]
+    FmaNotFused,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_messages_are_descriptive() {
+        let e = GpuSimError::DevicePollFailed("timeout".to_string());
+        assert!(e.to_string().contains("timeout"));
+        let e = GpuSimError::BufferMapRejected("validation error".to_string());
+        assert!(e.to_string().contains("validation error"));
+        let e = GpuSimError::ChannelDisconnected;
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[cfg(feature = "f64_emulation")]
+    #[test]
+    fn fma_not_fused_error_message() {
+        let e = GpuSimError::FmaNotFused;
+        assert!(e.to_string().contains("fma"));
+    }
 }

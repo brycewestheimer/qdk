@@ -28,33 +28,39 @@ fn assert_amplitude_approx(actual: Complex64, expected: Complex64, tol: f64) {
 #[test]
 fn test_measure_zero_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
 
     for _ in 0..100 {
-        assert!(!sim.measure(q), "|0> should always measure as false");
+        assert!(
+            !sim.measure(q).expect("measurement should succeed"),
+            "|0> should always measure as false"
+        );
     }
 }
 
 #[test]
 fn test_measure_one_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
     sim.x(q); // |1>
 
-    assert!(sim.measure(q), "|1> should always measure as true");
+    assert!(
+        sim.measure(q).expect("measurement should succeed"),
+        "|1> should always measure as true"
+    );
 }
 
 #[test]
 fn test_measure_plus_state_statistics() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
 
     let n = 10_000u32;
     let mut ones = 0u32;
 
     for _ in 0..n {
         sim.h(q); // Prepare |+>
-        if sim.measure(q) {
+        if sim.measure(q).expect("measurement should succeed") {
             ones += 1;
             sim.x(q); // Reset to |0> for next iteration
         }
@@ -79,14 +85,14 @@ fn test_bell_state_measurement_correlation() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
 
     for _ in 0..100 {
-        let q0 = sim.allocate();
-        let q1 = sim.allocate();
+        let q0 = sim.allocate().expect("allocation should succeed");
+        let q1 = sim.allocate().expect("allocation should succeed");
 
         sim.h(q0);
         sim.mcx(&[q0], q1); // Bell state: (|00> + |11>) / sqrt(2)
 
-        let r0 = sim.measure(q0);
-        let r1 = sim.measure(q1);
+        let r0 = sim.measure(q0).expect("measurement should succeed");
+        let r1 = sim.measure(q1).expect("measurement should succeed");
         assert_eq!(r0, r1, "Bell pair measurements must be correlated");
 
         // Reset and release for next iteration
@@ -106,17 +112,17 @@ fn test_ghz_state_measurement() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
 
     for _ in 0..100 {
-        let q0 = sim.allocate();
-        let q1 = sim.allocate();
-        let q2 = sim.allocate();
+        let q0 = sim.allocate().expect("allocation should succeed");
+        let q1 = sim.allocate().expect("allocation should succeed");
+        let q2 = sim.allocate().expect("allocation should succeed");
 
         sim.h(q0);
         sim.mcx(&[q0], q1);
         sim.mcx(&[q0], q2); // GHZ: (|000> + |111>) / sqrt(2)
 
-        let r0 = sim.measure(q0);
-        let r1 = sim.measure(q1);
-        let r2 = sim.measure(q2);
+        let r0 = sim.measure(q0).expect("measurement should succeed");
+        let r1 = sim.measure(q1).expect("measurement should succeed");
+        let r2 = sim.measure(q2).expect("measurement should succeed");
         assert_eq!(r0, r1, "GHZ: q0 and q1 must agree");
         assert_eq!(r1, r2, "GHZ: q1 and q2 must agree");
 
@@ -142,39 +148,45 @@ fn test_ghz_state_measurement() {
 #[test]
 fn test_joint_probability_bell_even_parity() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
 
     sim.h(q0);
     sim.mcx(&[q0], q1); // (|00> + |11>) / sqrt(2)
 
-    let p = sim.joint_probability(&[q0, q1]);
+    let p = sim
+        .joint_probability(&[q0, q1])
+        .expect("probability computation should succeed");
     assert_probability_approx(p, 0.0, 1e-6);
 }
 
 #[test]
 fn test_joint_probability_bell_odd_parity() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
 
     sim.x(q1); // |01>
     sim.h(q0); // (|01> + |11>) / sqrt(2)
     sim.mcx(&[q0], q1); // (|01> + |10>) / sqrt(2)
 
-    let p = sim.joint_probability(&[q0, q1]);
+    let p = sim
+        .joint_probability(&[q0, q1])
+        .expect("probability computation should succeed");
     assert_probability_approx(p, 1.0, 1e-6);
 }
 
 #[test]
 fn test_joint_measure_collapses_correctly() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
     sim.h(q0);
     sim.h(q1); // |++> = (|00> + |01> + |10> + |11>) / 2
 
-    let result = sim.joint_measure(&[q0, q1]);
+    let result = sim
+        .joint_measure(&[q0, q1])
+        .expect("joint measurement should succeed");
 
     let (state, _) = sim.get_state().expect("get_state should succeed");
     let f = std::f64::consts::FRAC_1_SQRT_2;
@@ -213,10 +225,10 @@ fn test_joint_measure_collapses_correctly() {
 #[test]
 fn test_collapse_plus_to_basis_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
     sim.h(q); // |+>
 
-    let result = sim.measure(q);
+    let result = sim.measure(q).expect("measurement should succeed");
 
     let (state, _) = sim.get_state().expect("get_state should succeed");
     assert_eq!(
@@ -237,13 +249,13 @@ fn test_collapse_plus_to_basis_state() {
 #[test]
 fn test_bell_collapse_entangled_partner() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
 
     sim.h(q0);
     sim.mcx(&[q0], q1); // (|00> + |11>) / sqrt(2)
 
-    let r0 = sim.measure(q0);
+    let r0 = sim.measure(q0).expect("measurement should succeed");
 
     let (state, _) = sim.get_state().expect("get_state should succeed");
     assert_eq!(
@@ -265,25 +277,34 @@ fn test_bell_collapse_entangled_partner() {
 #[test]
 fn test_qubit_is_zero_on_zero_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
-    assert!(sim.qubit_is_zero(q), "|0> should be zero");
+    let q = sim.allocate().expect("allocation should succeed");
+    assert!(
+        sim.qubit_is_zero(q).expect("qubit_is_zero should succeed"),
+        "|0> should be zero"
+    );
 }
 
 #[test]
 fn test_qubit_is_zero_on_one_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
     sim.x(q);
-    assert!(!sim.qubit_is_zero(q), "|1> should not be zero");
+    assert!(
+        !sim.qubit_is_zero(q).expect("qubit_is_zero should succeed"),
+        "|1> should not be zero"
+    );
 }
 
 #[test]
 fn test_qubit_is_zero_after_round_trip() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
     sim.h(q);
     sim.h(q); // H*H = I, back to |0>
-    assert!(sim.qubit_is_zero(q), "|0> after H*H should be zero");
+    assert!(
+        sim.qubit_is_zero(q).expect("qubit_is_zero should succeed"),
+        "|0> after H*H should be zero"
+    );
 }
 
 // ============================================================================
@@ -293,39 +314,42 @@ fn test_qubit_is_zero_after_round_trip() {
 #[test]
 fn test_release_zero_qubit() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
     // Qubit is |0>. Release should succeed without measurement.
     sim.release(q);
     // Qubit ID should be recycled.
-    let q2 = sim.allocate();
+    let q2 = sim.allocate().expect("allocation should succeed");
     assert_eq!(q, q2, "released ID should be recycled");
 }
 
 #[test]
 fn test_release_one_qubit() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
     sim.x(q); // |1>
     // Release should: measure (returns true), flip to |0>, deactivate.
     sim.release(q);
-    let q2 = sim.allocate();
+    let q2 = sim.allocate().expect("allocation should succeed");
     assert_eq!(q, q2, "released ID should be recycled");
-    assert!(sim.qubit_is_zero(q2), "recycled qubit should be in |0>");
+    assert!(
+        sim.qubit_is_zero(q2).expect("qubit_is_zero should succeed"),
+        "recycled qubit should be in |0>"
+    );
 }
 
 #[test]
 fn test_release_and_reallocate() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q0 = sim.allocate();
-    let _q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let _q1 = sim.allocate().expect("allocation should succeed");
     sim.release(q0);
-    let q2 = sim.allocate(); // Should recycle q0's ID and bit position
+    let q2 = sim.allocate().expect("allocation should succeed"); // Should recycle q0's ID and bit position
     assert_eq!(q2, q0, "should recycle released ID");
 
     // Verify the recycled qubit is usable.
     sim.h(q2);
     assert!(
-        !sim.qubit_is_zero(q2),
+        !sim.qubit_is_zero(q2).expect("qubit_is_zero should succeed"),
         "|+> should not be identified as |0>"
     );
 }
@@ -337,8 +361,8 @@ fn test_release_and_reallocate() {
 #[test]
 fn test_get_state_simple() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
 
     sim.h(q0);
     sim.mcx(&[q0], q1); // Bell state (|00> + |11>) / sqrt(2)
@@ -358,12 +382,12 @@ fn test_get_state_simple() {
 fn test_get_state_qubit_id_reordering() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
 
-    let q0 = sim.allocate(); // ID 0, bit 0
-    let q1 = sim.allocate(); // ID 1, bit 1
+    let q0 = sim.allocate().expect("allocation should succeed"); // ID 0, bit 0
+    let q1 = sim.allocate().expect("allocation should succeed"); // ID 1, bit 1
 
     sim.release(q0); // ID 0 and bit 0 go to recycle pool
 
-    let q2 = sim.allocate(); // Gets recycled ID 0, recycled bit 0
+    let q2 = sim.allocate().expect("allocation should succeed"); // Gets recycled ID 0, recycled bit 0
     assert_eq!(q2, 0, "should recycle ID 0");
 
     // Now: qubit ID 0 (q2) -> bit 0, qubit ID 1 (q1) -> bit 1
@@ -382,17 +406,17 @@ fn test_get_state_qubit_id_reordering() {
 fn test_get_state_nontrivial_reordering() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
 
-    let q0 = sim.allocate(); // ID 0 -> bit 0
-    let q1 = sim.allocate(); // ID 1 -> bit 1
-    let q2 = sim.allocate(); // ID 2 -> bit 2
+    let q0 = sim.allocate().expect("allocation should succeed"); // ID 0 -> bit 0
+    let q1 = sim.allocate().expect("allocation should succeed"); // ID 1 -> bit 1
+    let q2 = sim.allocate().expect("allocation should succeed"); // ID 2 -> bit 2
 
     // Release q0 and q1
     sim.release(q0);
     sim.release(q1);
 
     // Reallocate (LIFO recycling)
-    let _q3 = sim.allocate(); // ID 1, bit 1
-    let q4 = sim.allocate(); // ID 0, bit 0
+    let _q3 = sim.allocate().expect("allocation should succeed"); // ID 1, bit 1
+    let q4 = sim.allocate().expect("allocation should succeed"); // ID 0, bit 0
 
     // Scramble with swap_qubit_ids: swap the ID-to-bit mappings of ID 0 and ID 2
     sim.swap_qubit_ids(q4, q2); // After: ID 0 -> bit 2, ID 2 -> bit 0
@@ -417,7 +441,7 @@ fn test_get_state_nontrivial_reordering() {
 #[test]
 fn test_get_state_near_zero_filtering() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let _q = sim.allocate();
+    let _q = sim.allocate().expect("allocation should succeed");
 
     // |0> state: only one non-zero amplitude
     let (state, _) = sim.get_state().expect("get_state should succeed");
@@ -432,7 +456,7 @@ fn test_get_state_near_zero_filtering() {
 #[test]
 fn test_dump_zero_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let _q = sim.allocate();
+    let _q = sim.allocate().expect("allocation should succeed");
 
     let output = sim.dump().expect("dump should succeed");
     assert!(output.contains("1 qubits"), "dump should show qubit count");
@@ -442,8 +466,8 @@ fn test_dump_zero_state() {
 #[test]
 fn test_dump_bell_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
     sim.h(q0);
     sim.mcx(&[q0], q1);
 
@@ -462,22 +486,22 @@ fn test_set_rng_seed_determinism() {
     let mut sim1 = qdk_gpu_sim::GpuQuantumSim::new(Some(123)).expect("GPU sim should init");
     let mut sim2 = qdk_gpu_sim::GpuQuantumSim::new(Some(123)).expect("GPU sim should init");
 
-    let q1 = sim1.allocate();
-    let q2 = sim2.allocate();
+    let q1 = sim1.allocate().expect("allocation should succeed");
+    let q2 = sim2.allocate().expect("allocation should succeed");
 
     let mut results1 = Vec::new();
     let mut results2 = Vec::new();
 
     for _ in 0..50 {
         sim1.h(q1);
-        let r1 = sim1.measure(q1);
+        let r1 = sim1.measure(q1).expect("measurement should succeed");
         results1.push(r1);
         if r1 {
             sim1.x(q1);
         }
 
         sim2.h(q2);
-        let r2 = sim2.measure(q2);
+        let r2 = sim2.measure(q2).expect("measurement should succeed");
         results2.push(r2);
         if r2 {
             sim2.x(q2);
@@ -490,12 +514,12 @@ fn test_set_rng_seed_determinism() {
 #[test]
 fn test_set_rng_seed_resets_sequence() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
 
     let mut results1 = Vec::new();
     for _ in 0..20 {
         sim.h(q);
-        let r = sim.measure(q);
+        let r = sim.measure(q).expect("measurement should succeed");
         results1.push(r);
         if r {
             sim.x(q);
@@ -508,7 +532,7 @@ fn test_set_rng_seed_resets_sequence() {
     let mut results2 = Vec::new();
     for _ in 0..20 {
         sim.h(q);
-        let r = sim.measure(q);
+        let r = sim.measure(q).expect("measurement should succeed");
         results2.push(r);
         if r {
             sim.x(q);

@@ -239,7 +239,7 @@ pub fn make_gpu_sim(n: usize) -> qdk_gpu_sim::GpuQuantumSim {
     let mut sim =
         qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU simulator should initialize");
     for _ in 0..n {
-        sim.allocate();
+        sim.allocate().expect("qubit allocation should succeed");
     }
     sim
 }

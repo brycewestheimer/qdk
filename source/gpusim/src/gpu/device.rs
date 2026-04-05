@@ -64,6 +64,12 @@ impl GpuDevice {
             })
             .await?;
 
+        // Register an error handler for uncaptured device errors (e.g., OOM,
+        // device lost). These would otherwise be silently dropped.
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            log::error!("wgpu uncaptured device error: {error}");
+        }));
+
         let device_limits = device.limits();
 
         Ok(Self {

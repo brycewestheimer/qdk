@@ -33,6 +33,7 @@ fn random_circuit_scaling(c: &mut Criterion) {
                     b.iter(|| {
                         let mut sim = make_gpu_sim(num_qubits);
                         apply_circuit_gpu(&mut sim, &circuit);
+                        sim.sync_gpu();
                         black_box(&sim);
                     });
                 },
@@ -66,6 +67,7 @@ fn qft_scaling(c: &mut Criterion) {
             b.iter(|| {
                 let mut sim = make_gpu_sim(num_qubits);
                 apply_circuit_gpu(&mut sim, &circuit);
+                sim.sync_gpu();
                 black_box(&sim);
             });
         });
@@ -102,6 +104,7 @@ fn chemistry_circuit(c: &mut Criterion) {
                 b.iter(|| {
                     let mut sim = make_gpu_sim(total);
                     apply_circuit_gpu(&mut sim, &circuit);
+                    sim.sync_gpu();
                     black_box(&sim);
                 });
             });
@@ -136,7 +139,7 @@ fn many_shot_throughput(c: &mut Criterion) {
                         let mut sim = make_gpu_sim(num_qubits);
                         sim.set_rng_seed(shot);
                         apply_circuit_gpu(&mut sim, &circuit);
-                        black_box(sim.measure(0));
+                        black_box(sim.measure(0).expect("measurement should succeed"));
                     }
                 });
             });

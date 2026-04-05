@@ -163,11 +163,11 @@ impl MeasurementEngine {
         });
         device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|_| GpuSimError::BufferMapFailed)?;
+            .map_err(|e| GpuSimError::DevicePollFailed(format!("{e}")))?;
         receiver
             .recv()
-            .map_err(|_| GpuSimError::BufferMapFailed)?
-            .map_err(|_| GpuSimError::BufferMapFailed)?;
+            .map_err(|_| GpuSimError::ChannelDisconnected)?
+            .map_err(|e| GpuSimError::BufferMapRejected(format!("{e}")))?;
 
         // Step 6-7: Read partial sums and accumulate with Kahan summation.
         let data = buffer_slice.get_mapped_range();

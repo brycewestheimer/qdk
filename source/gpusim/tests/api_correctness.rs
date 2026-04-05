@@ -8,11 +8,11 @@
 fn allocate_after_gates_preserves_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
 
-    let q0 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
     sim.h(q0); // |+> = (|0> + |1>) / sqrt(2)
 
     // Allocate a second qubit. This MUST NOT destroy q0's superposition.
-    let q1 = sim.allocate();
+    let q1 = sim.allocate().expect("allocation should succeed");
 
     // Expected state: (|00> + |10>) / sqrt(2)
     // q0 is in |+>, q1 is in |0>.
@@ -35,7 +35,10 @@ fn allocate_after_gates_preserves_state() {
     }
 
     // Further check: the new qubit should be in |0>.
-    assert!(sim.qubit_is_zero(q1), "newly allocated qubit should be |0>");
+    assert!(
+        sim.qubit_is_zero(q1).expect("qubit_is_zero should succeed"),
+        "newly allocated qubit should be |0>"
+    );
 }
 
 /// H-02: Multi-qubit state is preserved across multiple allocations.
@@ -43,25 +46,28 @@ fn allocate_after_gates_preserves_state() {
 fn allocate_preserves_entangled_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
 
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
     sim.h(q0);
     sim.mcx(&[q0], q1); // Bell state: (|00> + |11>) / sqrt(2)
 
     // Allocate a third qubit.
-    let q2 = sim.allocate();
+    let q2 = sim.allocate().expect("allocation should succeed");
 
     // The Bell pair should still be entangled.
     // Measure q0, q1 should agree.
-    let r0 = sim.measure(q0);
-    let r1 = sim.measure(q1);
+    let r0 = sim.measure(q0).expect("measurement should succeed");
+    let r1 = sim.measure(q1).expect("measurement should succeed");
     assert_eq!(
         r0, r1,
         "Bell pair should remain correlated after allocation"
     );
 
     // q2 should be |0>.
-    assert!(sim.qubit_is_zero(q2), "newly allocated qubit should be |0>");
+    assert!(
+        sim.qubit_is_zero(q2).expect("qubit_is_zero should succeed"),
+        "newly allocated qubit should be |0>"
+    );
 }
 
 /// H-03: Deterministic measurement always collapses state.
@@ -72,10 +78,10 @@ fn allocate_preserves_entangled_state() {
 #[test]
 fn deterministic_measure_collapses_state() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
 
     // |0> state: P(|1>) should be ~0. Measure should return false.
-    let result = sim.measure(q);
+    let result = sim.measure(q).expect("measurement should succeed");
     assert!(!result, "|0> should measure as false");
 
     // After collapse, state should be exactly |0> (no residual amplitude).
@@ -91,14 +97,16 @@ fn deterministic_measure_collapses_state() {
 #[test]
 fn deterministic_measure_one_collapses() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
     sim.x(q); // |1>
 
-    let result = sim.measure(q);
+    let result = sim.measure(q).expect("measurement should succeed");
     assert!(result, "|1> should measure as true");
 
     // After collapse, P(|1>) should be exactly 1.0.
-    let p = sim.joint_probability(&[q]);
+    let p = sim
+        .joint_probability(&[q])
+        .expect("probability computation should succeed");
     assert!(
         (p - 1.0).abs() < 1e-6,
         "P(|1>) should be 1.0 after collapse, got {p}"
@@ -113,7 +121,7 @@ fn deterministic_measure_one_collapses() {
 #[test]
 fn rotation_precision_small_angle() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
 
     // Apply Rx(pi/1000) 1000 times. Should approximate Rx(pi) = -iX.
     let n = 1000;
@@ -124,7 +132,9 @@ fn rotation_precision_small_angle() {
 
     // After Rx(pi), |0> -> cos(pi/2)|0> - i*sin(pi/2)|1> = -i|1>
     // So P(|1>) should be ~1.0.
-    let p = sim.joint_probability(&[q]);
+    let p = sim
+        .joint_probability(&[q])
+        .expect("probability computation should succeed");
     assert!(
         (p - 1.0).abs() < 0.01,
         "1000x Rx(pi/1000) should approximate Rx(pi), got P(|1>)={p}"
@@ -135,8 +145,11 @@ fn rotation_precision_small_angle() {
 #[test]
 fn first_allocate_initializes_correctly() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q = sim.allocate();
-    assert!(sim.qubit_is_zero(q), "first allocated qubit should be |0>");
+    let q = sim.allocate().expect("allocation should succeed");
+    assert!(
+        sim.qubit_is_zero(q).expect("qubit_is_zero should succeed"),
+        "first allocated qubit should be |0>"
+    );
 }
 
 /// H-04: Control-target overlap panics in release builds.
@@ -144,7 +157,7 @@ fn first_allocate_initializes_correctly() {
 #[should_panic(expected = "target qubit must not also be a control")]
 fn control_target_overlap_panics() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
-    let q0 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
     // Use q0 as both control and target -- should panic.
     sim.mcx(&[q0], q0);
 }

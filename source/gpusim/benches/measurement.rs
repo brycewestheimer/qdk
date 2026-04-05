@@ -35,7 +35,7 @@ fn measurement_time(c: &mut Criterion) {
         group.bench_function(format!("measure_single/{num_qubits}q"), |b| {
             b.iter(|| {
                 sim.h(0);
-                black_box(sim.measure(0))
+                black_box(sim.measure(0).expect("measurement should succeed"))
             });
         });
 
@@ -64,7 +64,10 @@ fn joint_measurement(c: &mut Criterion) {
                     for &q in &qubits {
                         sim.h(q);
                     }
-                    black_box(sim.joint_measure(&qubits))
+                    black_box(
+                        sim.joint_measure(&qubits)
+                            .expect("joint measurement should succeed"),
+                    )
                 });
             });
         }

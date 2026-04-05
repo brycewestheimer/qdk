@@ -43,8 +43,8 @@ fn gpu_device_creation() {
 fn state_initialization() {
     let mut sim =
         qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU simulator should initialize");
-    let _q0 = sim.allocate();
-    let _q1 = sim.allocate();
+    let _q0 = sim.allocate().expect("allocation should succeed");
+    let _q1 = sim.allocate().expect("allocation should succeed");
 
     let (state, num_qubits) = sim.get_state().expect("get_state should succeed");
 
@@ -59,7 +59,7 @@ fn state_initialization() {
 fn hadamard_on_zero() {
     let mut sim =
         qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU simulator should initialize");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
     sim.h(q);
 
     let (state, num_qubits) = sim.get_state().expect("get_state should succeed");
@@ -87,7 +87,7 @@ fn hadamard_on_zero() {
 fn hadamard_twice_is_identity() {
     let mut sim =
         qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU simulator should initialize");
-    let q = sim.allocate();
+    let q = sim.allocate().expect("allocation should succeed");
 
     // Apply H twice: H*H = I, so state should return to |0>
     sim.h(q);
@@ -105,8 +105,8 @@ fn hadamard_twice_is_identity() {
 fn hadamard_on_two_qubit_system() {
     let mut sim =
         qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU simulator should initialize");
-    let q0 = sim.allocate();
-    let _q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let _q1 = sim.allocate().expect("allocation should succeed");
 
     // Apply H to q0 only. State should be (|00> + |01>) / sqrt(2)
     // (qubit 0 is the LSB, so flipping q0 flips bit 0)

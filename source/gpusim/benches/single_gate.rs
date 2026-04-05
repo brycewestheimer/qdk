@@ -32,7 +32,10 @@ fn single_qubit_gates(c: &mut Criterion) {
             }
             for &(pos_name, target) in &targets {
                 group.bench_function(format!("H/{num_qubits}q/{pos_name}"), |b| {
-                    b.iter(|| black_box(sim.h(target)));
+                    b.iter(|| {
+                        sim.h(target);
+                        sim.sync_gpu();
+                    });
                 });
             }
         }
@@ -45,7 +48,10 @@ fn single_qubit_gates(c: &mut Criterion) {
             }
             for &(pos_name, target) in &targets {
                 group.bench_function(format!("X/{num_qubits}q/{pos_name}"), |b| {
-                    b.iter(|| black_box(sim.x(target)));
+                    b.iter(|| {
+                        sim.x(target);
+                        sim.sync_gpu();
+                    });
                 });
             }
         }
@@ -58,7 +64,10 @@ fn single_qubit_gates(c: &mut Criterion) {
             }
             for &(pos_name, target) in &targets {
                 group.bench_function(format!("T/{num_qubits}q/{pos_name}"), |b| {
-                    b.iter(|| black_box(sim.t(target)));
+                    b.iter(|| {
+                        sim.t(target);
+                        sim.sync_gpu();
+                    });
                 });
             }
         }
@@ -72,7 +81,10 @@ fn single_qubit_gates(c: &mut Criterion) {
             let angle = std::f64::consts::FRAC_PI_4;
             for &(pos_name, target) in &targets {
                 group.bench_function(format!("Rx_pi4/{num_qubits}q/{pos_name}"), |b| {
-                    b.iter(|| black_box(sim.rx(angle, target)));
+                    b.iter(|| {
+                        sim.rx(angle, target);
+                        sim.sync_gpu();
+                    });
                 });
             }
         }
@@ -92,10 +104,16 @@ fn two_qubit_gates(c: &mut Criterion) {
                 sim.h(q);
             }
             group.bench_function(format!("CNOT/{num_qubits}q/adjacent"), |b| {
-                b.iter(|| black_box(sim.mcx(&[0], 1)));
+                b.iter(|| {
+                    sim.mcx(&[0], 1);
+                    sim.sync_gpu();
+                });
             });
             group.bench_function(format!("CNOT/{num_qubits}q/distant"), |b| {
-                b.iter(|| black_box(sim.mcx(&[0], num_qubits - 1)));
+                b.iter(|| {
+                    sim.mcx(&[0], num_qubits - 1);
+                    sim.sync_gpu();
+                });
             });
         }
 
@@ -106,10 +124,16 @@ fn two_qubit_gates(c: &mut Criterion) {
                 sim.h(q);
             }
             group.bench_function(format!("SWAP/{num_qubits}q/adjacent"), |b| {
-                b.iter(|| black_box(sim.swap(0, 1)));
+                b.iter(|| {
+                    sim.swap(0, 1);
+                    sim.sync_gpu();
+                });
             });
             group.bench_function(format!("SWAP/{num_qubits}q/distant"), |b| {
-                b.iter(|| black_box(sim.swap(0, num_qubits - 1)));
+                b.iter(|| {
+                    sim.swap(0, num_qubits - 1);
+                    sim.sync_gpu();
+                });
             });
         }
     }
@@ -130,7 +154,10 @@ fn multi_controlled_gates(c: &mut Criterion) {
             let controls: Vec<usize> = (0..num_controls).collect();
             let target = num_controls;
             group.bench_function(format!("MCX/{num_controls}ctrl/{num_qubits}q"), |b| {
-                b.iter(|| black_box(sim.mcx(&controls, target)));
+                b.iter(|| {
+                    sim.mcx(&controls, target);
+                    sim.sync_gpu();
+                });
             });
         }
     }
@@ -149,7 +176,10 @@ fn gpu_vs_sparse_single_gate(c: &mut Criterion) {
                 gpu_sim.h(q);
             }
             group.bench_with_input(BenchmarkId::new("gpu", num_qubits), &num_qubits, |b, _| {
-                b.iter(|| black_box(gpu_sim.h(0)));
+                b.iter(|| {
+                    gpu_sim.h(0);
+                    gpu_sim.sync_gpu();
+                });
             });
         }
 

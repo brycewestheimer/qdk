@@ -44,16 +44,16 @@ const ONE: (f32, f32) = (1.0, 0.0);
 
 fn two_qubit_sim() -> (qdk_gpu_sim::GpuQuantumSim, usize, usize) {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should initialize");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
     (sim, q0, q1)
 }
 
 fn three_qubit_sim() -> (qdk_gpu_sim::GpuQuantumSim, usize, usize, usize) {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should initialize");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
-    let q2 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
+    let q2 = sim.allocate().expect("allocation should succeed");
     (sim, q0, q1, q2)
 }
 
@@ -528,10 +528,10 @@ fn mcz_on_10() {
 #[test]
 fn three_control_x() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("should init");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
-    let q2 = sim.allocate();
-    let q3 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
+    let q2 = sim.allocate().expect("allocation should succeed");
+    let q3 = sim.allocate().expect("allocation should succeed");
 
     sim.x(q0);
     sim.x(q1);
@@ -560,10 +560,10 @@ fn three_control_x() {
 #[test]
 fn three_control_x_partial() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("should init");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
-    let q2 = sim.allocate();
-    let q3 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
+    let q2 = sim.allocate().expect("allocation should succeed");
+    let q3 = sim.allocate().expect("allocation should succeed");
 
     sim.x(q0);
     sim.x(q1);
@@ -677,10 +677,10 @@ fn ghz_3_qubit() {
 #[test]
 fn ghz_4_qubit() {
     let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("should init");
-    let q0 = sim.allocate();
-    let q1 = sim.allocate();
-    let q2 = sim.allocate();
-    let q3 = sim.allocate();
+    let q0 = sim.allocate().expect("allocation should succeed");
+    let q1 = sim.allocate().expect("allocation should succeed");
+    let q2 = sim.allocate().expect("allocation should succeed");
+    let q3 = sim.allocate().expect("allocation should succeed");
     sim.h(q0);
     sim.mcx(&[q0], q1);
     sim.mcx(&[q0], q2);

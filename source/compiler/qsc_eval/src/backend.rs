@@ -1206,11 +1206,11 @@ impl Backend for DenseSim {
     }
 
     fn m(&mut self, q: usize) -> val::Result {
-        val::Result::Val(self.sim.measure(q))
+        val::Result::Val(self.sim.measure(q).expect("GPU measurement should succeed"))
     }
 
     fn mresetz(&mut self, q: usize) -> val::Result {
-        let res = self.sim.measure(q);
+        let res = self.sim.measure(q).expect("GPU measurement should succeed");
         if res {
             self.sim.x(q);
         }
@@ -1218,7 +1218,7 @@ impl Backend for DenseSim {
     }
 
     fn reset(&mut self, q: usize) {
-        if self.sim.measure(q) {
+        if self.sim.measure(q).expect("GPU measurement should succeed") {
             self.sim.x(q);
         }
     }
@@ -1308,11 +1308,16 @@ impl Backend for DenseSim {
     }
 
     fn qubit_allocate(&mut self) -> usize {
-        self.sim.allocate()
+        self.sim
+            .allocate()
+            .expect("GPU qubit allocation should succeed")
     }
 
     fn qubit_release(&mut self, q: usize) -> bool {
-        let was_zero = self.sim.qubit_is_zero(q);
+        let was_zero = self
+            .sim
+            .qubit_is_zero(q)
+            .expect("GPU qubit_is_zero should succeed");
         self.sim.release(q);
         was_zero
     }
@@ -1344,7 +1349,9 @@ impl Backend for DenseSim {
     }
 
     fn qubit_is_zero(&mut self, q: usize) -> bool {
-        self.sim.qubit_is_zero(q)
+        self.sim
+            .qubit_is_zero(q)
+            .expect("GPU qubit_is_zero should succeed")
     }
 
     fn custom_intrinsic(&mut self, name: &str, arg: Value) -> Option<Result<Value, String>> {
@@ -1359,7 +1366,10 @@ impl Backend for DenseSim {
                     .iter()
                     .map(|q| q.clone().unwrap_qubit().deref().0)
                     .collect::<Vec<_>>();
-                let q = self.sim.allocate();
+                let q = self
+                    .sim
+                    .allocate()
+                    .expect("GPU qubit allocation should succeed");
                 self.sim
                     .mcrz(&ctls, -2.0 * theta.clone().unwrap_double(), q);
                 self.sim.release(q);

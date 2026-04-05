@@ -57,7 +57,7 @@ mod report {
         let mut sim =
             GpuQuantumSim::new(Some(PRECISION_SEED)).expect("GPU simulator should initialize");
         for _ in 0..n {
-            sim.allocate();
+            sim.allocate().expect("allocation should succeed");
         }
         for g in circuit {
             match g {

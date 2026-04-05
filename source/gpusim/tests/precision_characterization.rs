@@ -63,7 +63,7 @@ fn run_on_gpu(circuit: &[Gate], num_qubits: usize) -> Vec<(BigUint, Complex64)> 
     let mut sim =
         GpuQuantumSim::new(Some(PRECISION_SEED)).expect("GPU simulator should initialize");
     for _ in 0..num_qubits {
-        sim.allocate();
+        sim.allocate().expect("allocation should succeed");
     }
     for gate in circuit {
         match gate {
@@ -291,7 +291,7 @@ fn qpe_energy_comparison() {
             let mut sim =
                 GpuQuantumSim::new(Some(shot_seed)).expect("GPU simulator should initialize");
             for _ in 0..total_qubits {
-                sim.allocate();
+                sim.allocate().expect("allocation should succeed");
             }
             apply_gates_gpu(&mut sim, &circuit);
             let phase = read_ancilla_phase_gpu(&mut sim, system_qubits, ancilla_qubits);
@@ -431,7 +431,9 @@ fn read_ancilla_phase_gpu(
 ) -> f64 {
     let mut phase = 0.0_f64;
     for a in 0..num_ancilla {
-        let result = sim.measure(system_offset + a);
+        let result = sim
+            .measure(system_offset + a)
+            .expect("measurement should succeed");
         if result {
             phase += 1.0 / (1u64 << (a + 1)) as f64;
         }

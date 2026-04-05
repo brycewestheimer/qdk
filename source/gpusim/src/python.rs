@@ -18,17 +18,35 @@
 use std::panic::{self, AssertUnwindSafe};
 
 use num_complex::Complex64;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyComplex;
 
 use crate::GpuQuantumSim;
 use crate::error::GpuSimError;
 
-/// Convert a [`GpuSimError`] into a Python `RuntimeError`.
+/// Convert a [`GpuSimError`] into a typed Python exception.
+///
+/// - Hardware/driver errors -> `OSError`
+/// - Invalid qubit IDs -> `ValueError`
+/// - GPU runtime errors -> `RuntimeError`
 #[allow(clippy::needless_pass_by_value)] // used as map_err callback
 fn to_py_err(e: GpuSimError) -> PyErr {
-    PyErr::new::<PyRuntimeError, _>(e.to_string())
+    match &e {
+        GpuSimError::NoAdapter
+        | GpuSimError::DeviceRequest(_)
+        | GpuSimError::TooManyQubits { .. }
+        | GpuSimError::BufferTooLarge { .. } => PyErr::new::<PyOSError, _>(e.to_string()),
+        GpuSimError::QubitNotFound(_) | GpuSimError::DuplicateQubit(_) => {
+            PyErr::new::<PyValueError, _>(e.to_string())
+        }
+        #[cfg(feature = "f64_emulation")]
+        GpuSimError::FmaNotFused => PyErr::new::<PyOSError, _>(e.to_string()),
+        GpuSimError::DevicePollFailed(_)
+        | GpuSimError::BufferMapRejected(_)
+        | GpuSimError::ChannelDisconnected
+        | GpuSimError::DeviceError(_) => PyErr::new::<PyRuntimeError, _>(e.to_string()),
+    }
 }
 
 /// Catch a Rust panic and convert it to a Python `RuntimeError`.
@@ -100,8 +118,11 @@ impl PyGpuQuantumSim {
     ///
     /// Returns:
     ///     int: The allocated qubit's ID.
+    ///
+    /// Raises:
+    ///     OSError: If the GPU cannot hold the required state vector.
     fn allocate(&mut self) -> PyResult<usize> {
-        catch_panic(AssertUnwindSafe(|| self.inner.allocate()))
+        self.inner.allocate().map_err(to_py_err)
     }
 
     /// Release a qubit by ID.
@@ -448,7 +469,7 @@ impl PyGpuQuantumSim {
     /// Raises:
     ///     RuntimeError: If the qubit ID is invalid.
     fn measure(&mut self, id: usize) -> PyResult<bool> {
-        catch_panic(AssertUnwindSafe(|| self.inner.measure(id)))
+        self.inner.measure(id).map_err(to_py_err)
     }
 
     /// Joint measurement on multiple qubits.
@@ -465,7 +486,7 @@ impl PyGpuQuantumSim {
     ///     RuntimeError: If any qubit ID is invalid.
     #[allow(clippy::needless_pass_by_value)]
     fn joint_measure(&mut self, ids: Vec<usize>) -> PyResult<bool> {
-        catch_panic(AssertUnwindSafe(|| self.inner.joint_measure(&ids)))
+        self.inner.joint_measure(&ids).map_err(to_py_err)
     }
 
     /// Compute the probability of odd parity for the given qubits.
@@ -482,7 +503,7 @@ impl PyGpuQuantumSim {
     ///     RuntimeError: If any qubit ID is invalid.
     #[allow(clippy::needless_pass_by_value)]
     fn joint_probability(&mut self, ids: Vec<usize>) -> PyResult<f64> {
-        catch_panic(AssertUnwindSafe(|| self.inner.joint_probability(&ids)))
+        self.inner.joint_probability(&ids).map_err(to_py_err)
     }
 
     /// Check if a qubit is in the |0> state (within floating-point tolerance).
@@ -496,7 +517,7 @@ impl PyGpuQuantumSim {
     /// Raises:
     ///     RuntimeError: If the qubit ID is invalid.
     fn qubit_is_zero(&mut self, id: usize) -> PyResult<bool> {
-        catch_panic(AssertUnwindSafe(|| self.inner.qubit_is_zero(id)))
+        self.inner.qubit_is_zero(id).map_err(to_py_err)
     }
 
     // ---- State inspection ----
