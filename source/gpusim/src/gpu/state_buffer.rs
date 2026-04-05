@@ -253,10 +253,16 @@ impl StateBuffer {
         // Build a zero-initialized byte vector with the first amplitude set to
         // 1.0 + 0.0i. This is only called on the very first allocation (typically
         // 1 qubit = 16 or 32 bytes), so the CPU-side Vec is negligible.
-        let active_size = self.num_amplitudes * ActivePrecision::BYTES_PER_AMPLITUDE;
+        //
+        // Use the full capacity (not just active size) so the buffer matches
+        // `capacity_amplitudes`. Otherwise, `grow_preserving_state` may assume
+        // the buffer is larger than it actually is and issue out-of-bounds
+        // GPU commands.
+        let buffer_size = self.capacity_amplitudes.max(self.num_amplitudes)
+            * ActivePrecision::BYTES_PER_AMPLITUDE;
         // First allocation is tiny (~16-32 bytes); truncation to usize is safe.
         #[allow(clippy::cast_possible_truncation)]
-        let mut data = vec![0u8; active_size as usize];
+        let mut data = vec![0u8; buffer_size as usize];
         let one_encoded = ActivePrecision::encode_complex(Complex64::new(1.0, 0.0));
         for (i, &val) in one_encoded.iter().enumerate() {
             let start = i * 4;

@@ -9,15 +9,29 @@ const TOL: f32 = 1e-6;
 // ============================================================================
 
 /// Expand the sparse state from `get_state()` into a dense amplitude vector.
+///
+/// The raw `get_state()` returns indices in little-endian convention
+/// (qubit ID 0 = bit 0 = LSB). This helper reverses the bit order so that
+/// qubit 0 is the MSB, matching the QDK presentation convention used by
+/// `capture_quantum_state()` in the compiler backend. This means:
+/// - In a 2-qubit system, index 1 = |01> (q1 excited), index 2 = |10> (q0 excited).
+/// - In a 3-qubit system, index 4 = |100> (q0 excited), index 1 = |001> (q2 excited).
 fn dense_state(sim: &qdk_gpu_sim::GpuQuantumSim) -> Vec<(f32, f32)> {
     let (sparse, num_qubits) = sim.get_state().expect("get_state should succeed");
     let n = 1usize << num_qubits;
     let mut dense = vec![(0.0f32, 0.0f32); n];
     for (idx, amp) in sparse {
         let i: usize = idx.try_into().expect("index should fit");
+        // Reverse bits: map LE index (q0=LSB) to BE index (q0=MSB).
+        let mut reversed = 0usize;
+        for bit in 0..num_qubits {
+            if i & (1 << bit) != 0 {
+                reversed |= 1 << (num_qubits - 1 - bit);
+            }
+        }
         #[allow(clippy::cast_possible_truncation)]
         {
-            dense[i] = (amp.re as f32, amp.im as f32);
+            dense[reversed] = (amp.re as f32, amp.im as f32);
         }
     }
     dense
@@ -567,17 +581,17 @@ fn three_control_x_partial() {
 
     sim.x(q0);
     sim.x(q1);
-    // q2 stays |0>. State: |0110> = index 6
+    // q2 stays |0>. State: |1100> = index 12 (q0=MSB, q1=next)
 
     sim.mcx(&[q0, q1, q2], q3);
-    // Not all controls |1> -> no flip. State unchanged: index 6
+    // Not all controls |1> -> no flip. State unchanged: index 12
 
     let state = dense_state(&sim);
     for (i, amp) in state.iter().enumerate() {
-        if i == 6 {
+        if i == 12 {
             assert!(
                 (amp.0 - 1.0).abs() < TOL && amp.1.abs() < TOL,
-                "expected 1.0 at index 6, got {amp:?}"
+                "expected 1.0 at index 12, got {amp:?}"
             );
         } else {
             assert!(
@@ -699,10 +713,13 @@ fn ghz_4_qubit() {
 #[test]
 fn swap_qubit_ids_no_state_change() {
     let (mut sim, q0, q1) = two_qubit_sim();
-    sim.x(q0); // |10>
-    let before = dense_state(&sim);
+    sim.x(q0); // |10> -> dense index 2 (q0 at MSB)
     sim.swap_qubit_ids(q0, q1);
-    assert_state_approx_eq(&dense_state(&sim), &before, TOL);
+    // swap_qubit_ids relabels IDs without changing physical state.
+    // q0 now refers to the physical qubit that was q1 (|0>),
+    // q1 now refers to the physical qubit that was q0 (|1>).
+    // In the dense representation (q0=MSB): q0=0, q1=1 -> |01> = index 1.
+    assert_state_approx_eq(&dense_state(&sim), &[Z, ONE, Z, Z], TOL);
 }
 
 #[test]

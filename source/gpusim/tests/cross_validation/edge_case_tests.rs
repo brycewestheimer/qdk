@@ -4,18 +4,16 @@ use super::runners::{compare_states, phase_normalize, run_on_gpu, run_on_sparse}
 
 /// Allocate/release/re-allocate cycle.
 ///
-/// When releasing qubit 1 that is entangled with qubit 0, both simulators
-/// will measure and collapse. Since the measurement is random, the final states
-/// may differ between runs. This test uses a pattern that avoids depending on
-/// the random measurement outcome by applying gates after the release.
+/// Tests that releasing a qubit and re-allocating works correctly.
+/// Uses a non-entangled release to avoid measurement-outcome dependence
+/// between the two simulators.
 #[test]
 fn test_alloc_release_realloc() {
     let circuit = TestCircuit {
         num_qubits: 2,
         gates: vec![
             TestGate::H(0),
-            TestGate::Cx(0, 1),
-            TestGate::Release(1), // release qubit 1
+            TestGate::Release(1), // release qubit 1 (in |0>, deterministic)
             TestGate::Allocate,   // allocate a new qubit (becomes index 2)
             TestGate::H(2),       // apply H to new qubit
         ],

@@ -97,12 +97,25 @@ impl GpuDevice {
     fn select_adapter(instance: &wgpu::Instance) -> Result<Adapter, GpuSimError> {
         let adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY);
 
+        // Allow overriding adapter selection via GPU_SIM_ADAPTER env var.
+        // Set to "integrated" to prefer the integrated GPU over discrete.
+        let prefer_integrated =
+            std::env::var("GPU_SIM_ADAPTER").is_ok_and(|v| v.eq_ignore_ascii_case("integrated"));
+
         let score_adapter = |adapter: &Adapter| -> (u32, u32, u32, u32) {
             let info = adapter.get_info();
-            let device_score = match info.device_type {
-                DeviceType::DiscreteGpu => 8,
-                DeviceType::IntegratedGpu => 4,
-                _ => 0,
+            let device_score = if prefer_integrated {
+                match info.device_type {
+                    DeviceType::IntegratedGpu => 8,
+                    DeviceType::DiscreteGpu => 4,
+                    _ => 0,
+                }
+            } else {
+                match info.device_type {
+                    DeviceType::DiscreteGpu => 8,
+                    DeviceType::IntegratedGpu => 4,
+                    _ => 0,
+                }
             };
             // On Windows, DX12 is the native API and often has better driver
             // support than Vulkan-over-D3D12 (e.g., Dozen). Score them equally
