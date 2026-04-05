@@ -201,6 +201,11 @@ fn gpu_vs_sparse_single_gate(c: &mut Criterion) {
     group.finish();
 }
 
+// Sample size 100: single-gate benchmarks are fast (microsecond-scale GPU
+// dispatches), so 100 iterations provide tight confidence intervals without
+// excessive runtime. Warm-up (3s) ensures the GPU driver has initialized
+// shader caches and entered a stable power state. Measurement time (5s) is
+// sufficient for the ~100us operations being measured.
 #[cfg(feature = "gpu-tests")]
 criterion_group!(
     name = benches;

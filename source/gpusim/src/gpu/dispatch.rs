@@ -165,8 +165,10 @@ pub struct CollapseParamsF64 {
     /// DS normalization factor (hi, lo).
     pub norm_hi: f32,
     pub norm_lo: f32,
+    // Must be pub for bytemuck Pod derive; underscore signals padding for WGSL struct alignment.
     #[allow(clippy::pub_underscore_fields)]
     pub _pad2: u32,
+    // Must be pub for bytemuck Pod derive; underscore signals padding for WGSL struct alignment.
     #[allow(clippy::pub_underscore_fields)]
     pub _pad3: u32,
 }
@@ -221,6 +223,7 @@ fn encode_2x2_ds_f64(gate: &crate::gates::Mat2x2F64) -> [[f32; 4]; 4] {
 ///
 /// Returns `min(required.div_ceil(256), MAX_WORKGROUPS)`.
 fn capped_workgroup_count(num_items: u64) -> u32 {
+    // Workgroup count is bounded by GPU dispatch limits (~65535); truncation to u32 is safe.
     #[allow(clippy::cast_possible_truncation)]
     let needed = num_items.div_ceil(256).min(u64::from(MAX_WORKGROUPS)) as u32;
     needed
@@ -234,6 +237,7 @@ fn capped_workgroup_count(num_items: u64) -> u32 {
 /// The state vector is modified in-place on the GPU. No CPU synchronization
 /// occurs -- the operation is fully asynchronous from the CPU's perspective,
 /// but wgpu ensures sequential execution of submitted commands.
+// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_single_qubit_gate(
     device: &wgpu::Device,
@@ -318,6 +322,7 @@ pub fn dispatch_single_qubit_gate(
 ///
 /// # Panics
 /// Panics if `bit_a == bit_b` or `num_qubits < 2`.
+// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_two_qubit_gate(
     device: &wgpu::Device,
@@ -411,6 +416,7 @@ pub fn dispatch_two_qubit_gate(
 ///
 /// # Panics
 /// Panics if `target_bit` is set in `control_mask`.
+// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_multi_controlled_gate(
     device: &wgpu::Device,
@@ -499,6 +505,7 @@ pub fn dispatch_multi_controlled_gate(
 /// It accepts a `Mat2x2F64` (f64 complex entries) and encodes them directly
 /// to DS format via [`encode_2x2_ds_f64`], bypassing f32 intermediates.
 #[cfg(feature = "f64_emulation")]
+// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_single_qubit_gate_f64(
     device: &wgpu::Device,
@@ -560,6 +567,7 @@ pub fn dispatch_single_qubit_gate_f64(
 /// # Panics
 /// Panics if `target_bit` is set in `control_mask`.
 #[cfg(feature = "f64_emulation")]
+// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_multi_controlled_gate_f64(
     device: &wgpu::Device,
@@ -634,6 +642,7 @@ pub struct MeasureParams {
     /// internal bit position `i` is part of the measurement.
     pub measure_mask: u32,
     /// Padding for 16-byte alignment.
+    // Must be pub for bytemuck Pod derive; underscore signals padding for WGSL struct alignment.
     #[allow(clippy::pub_underscore_fields)]
     pub _pad: u32,
 }
@@ -655,10 +664,13 @@ pub struct CollapseParams {
     /// Number of workgroups dispatched (for grid-stride loop).
     pub num_workgroups: u32,
     /// Padding for 16-byte alignment.
+    // Must be pub for bytemuck Pod derive; underscore signals padding for WGSL struct alignment.
     #[allow(clippy::pub_underscore_fields)]
     pub _pad0: u32,
+    // Must be pub for bytemuck Pod derive; underscore signals padding for WGSL struct alignment.
     #[allow(clippy::pub_underscore_fields)]
     pub _pad1: u32,
+    // Must be pub for bytemuck Pod derive; underscore signals padding for WGSL struct alignment.
     #[allow(clippy::pub_underscore_fields)]
     pub _pad2: u32,
 }

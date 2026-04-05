@@ -30,7 +30,8 @@ use crate::error::GpuSimError;
 /// - Hardware/driver errors -> `OSError`
 /// - Invalid qubit IDs -> `ValueError`
 /// - GPU runtime errors -> `RuntimeError`
-#[allow(clippy::needless_pass_by_value)] // used as map_err callback
+// PyO3 map_err callback takes owned GpuSimError for conversion.
+#[allow(clippy::needless_pass_by_value)]
 fn to_py_err(e: GpuSimError) -> PyErr {
     match &e {
         GpuSimError::NoAdapter
@@ -302,6 +303,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mcx(&mut self, controls: Vec<usize>, target: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| self.inner.mcx(&controls, target)))
@@ -315,6 +317,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mcy(&mut self, controls: Vec<usize>, target: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| self.inner.mcy(&controls, target)))
@@ -328,6 +331,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mcz(&mut self, controls: Vec<usize>, target: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| self.inner.mcz(&controls, target)))
@@ -341,6 +345,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mch(&mut self, controls: Vec<usize>, target: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| self.inner.mch(&controls, target)))
@@ -354,6 +359,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mcs(&mut self, controls: Vec<usize>, target: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| self.inner.mcs(&controls, target)))
@@ -367,6 +373,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mcsadj(&mut self, controls: Vec<usize>, target: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| self.inner.mcsadj(&controls, target)))
@@ -380,6 +387,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mct(&mut self, controls: Vec<usize>, target: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| self.inner.mct(&controls, target)))
@@ -393,6 +401,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mctadj(&mut self, controls: Vec<usize>, target: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| self.inner.mctadj(&controls, target)))
@@ -407,6 +416,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mcrz(&mut self, controls: Vec<usize>, theta: f64, target: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| {
@@ -427,6 +437,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn mcphase(
         &mut self,
@@ -454,6 +465,21 @@ impl PyGpuQuantumSim {
     ///     RuntimeError: If either qubit ID is invalid.
     fn swap_qubit_ids(&mut self, q1: usize, q2: usize) -> PyResult<()> {
         catch_panic(AssertUnwindSafe(|| self.inner.swap_qubit_ids(q1, q2)))
+    }
+
+    /// Apply the physical SWAP gate to two qubits.
+    ///
+    /// This applies the 4x4 SWAP unitary to the state vector on the GPU.
+    /// It is NOT a qubit ID relabeling -- see swap_qubit_ids for that.
+    ///
+    /// Args:
+    ///     q1: First qubit ID.
+    ///     q2: Second qubit ID.
+    ///
+    /// Raises:
+    ///     RuntimeError: If either qubit ID is invalid.
+    fn swap(&mut self, q1: usize, q2: usize) -> PyResult<()> {
+        catch_panic(AssertUnwindSafe(|| self.inner.swap(q1, q2)))
     }
 
     // ---- Measurement ----
@@ -484,6 +510,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn joint_measure(&mut self, ids: Vec<usize>) -> PyResult<bool> {
         self.inner.joint_measure(&ids).map_err(to_py_err)
@@ -501,6 +528,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If any qubit ID is invalid.
+    // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn joint_probability(&mut self, ids: Vec<usize>) -> PyResult<f64> {
         self.inner.joint_probability(&ids).map_err(to_py_err)
@@ -567,6 +595,7 @@ impl PyGpuQuantumSim {
     ///
     /// Returns:
     ///     int: Maximum qubit count.
+    // PyO3 methods return to Python; #[must_use] is meaningless at the FFI boundary.
     #[allow(clippy::must_use_candidate)]
     fn max_qubits(&self) -> u32 {
         self.inner.max_qubits()

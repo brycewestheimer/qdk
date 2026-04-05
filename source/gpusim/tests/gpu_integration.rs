@@ -37,6 +37,41 @@ fn gpu_device_creation() {
         info.name, info.device_type, info.backend
     );
     eprintln!("Max qubits (f32): {}", sim.max_qubits());
+
+    // M-16: Assert adapter is a real GPU, not a software/CPU fallback.
+    let device_type_str = format!("{:?}", info.device_type);
+    assert!(
+        device_type_str == "DiscreteGpu" || device_type_str == "IntegratedGpu",
+        "expected a discrete or integrated GPU, got {device_type_str}",
+    );
+}
+
+/// M-09: Verify `max_qubits()` returns a reasonable value and is consistent.
+#[test]
+fn max_qubits_boundary() {
+    let sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU simulator should initialize");
+    let max_q = sim.max_qubits();
+
+    // A real GPU should support at least 10 qubits (1024 amplitudes * 8 bytes
+    // = 8 KB -- trivially within any GPU's buffer limit).
+    assert!(
+        max_q >= 10,
+        "max_qubits() returned {max_q}, expected at least 10"
+    );
+
+    // Consumer GPUs with 8-16 GB VRAM typically support 28-30 qubits in f32
+    // mode. Cap sanity check at 40 (1 TB would be needed).
+    assert!(
+        max_q <= 40,
+        "max_qubits() returned {max_q}, which seems unreasonably high"
+    );
+
+    // Verify consistency: calling max_qubits() twice returns the same value.
+    assert_eq!(
+        sim.max_qubits(),
+        max_q,
+        "max_qubits() should be deterministic"
+    );
 }
 
 #[test]

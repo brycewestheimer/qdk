@@ -159,6 +159,17 @@ fn many_shot_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+// Sample size 20: circuit benchmarks are expensive (hundreds of milliseconds to
+// seconds each). 20 samples balance statistical reliability with total runtime
+// (~5-10 minutes for the full suite). Warm-up (5s) is longer than single-gate
+// benchmarks because circuit creation and initial GPU buffer allocation add
+// one-time overhead.
+//
+// Individual benchmark groups override measurement_time where needed:
+//   - random_circuit_scaling: 10s (medium circuits, needs more iterations)
+//   - chemistry_circuit: 15s (deep Trotter circuits are the slowest)
+//   - many_shot_throughput: 20s + sample_size(10) (each iteration runs
+//     100-1000 full circuit+measure shots; fewer samples avoid excessive runtime)
 #[cfg(feature = "gpu-tests")]
 criterion_group!(
     name = benches;

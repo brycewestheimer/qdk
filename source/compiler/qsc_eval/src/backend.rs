@@ -1278,9 +1278,7 @@ impl Backend for DenseSim {
     }
 
     fn sx(&mut self, q: usize) {
-        self.sim.h(q);
-        self.sim.s(q);
-        self.sim.h(q);
+        self.sim.sx(q);
     }
 
     fn swap(&mut self, q0: usize, q1: usize) {

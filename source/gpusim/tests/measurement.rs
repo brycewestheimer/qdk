@@ -67,12 +67,21 @@ fn test_measure_plus_state_statistics() {
         // If measured |0>, qubit is already in |0> -- no reset needed.
     }
 
-    let fraction = f64::from(ones) / f64::from(n);
-    // Expected: 0.5. 3-sigma for binomial(10000, 0.5): 3 * sqrt(0.25/10000) = 0.015.
-    // Use a generous 5% bound for GPU floating-point variation.
+    // Chi-squared goodness-of-fit test for H0: P(|0>) = P(|1>) = 0.5.
+    //
+    // For a binomial distribution with n trials and two outcomes:
+    //   chi2 = (2*ones - n)^2 / n
+    //
+    // With 1 degree of freedom, the critical value at alpha=0.05 is 3.841.
+    // Rejecting when chi2 > 3.841 means there is <5% chance of a false failure
+    // for a fair coin.
+    let diff = f64::from(2 * ones) - f64::from(n);
+    let chi2 = (diff * diff) / f64::from(n);
     assert!(
-        (fraction - 0.5).abs() < 0.05,
-        "measured fraction {fraction} too far from 0.5",
+        chi2 <= 3.841,
+        "chi-squared test failed: chi2 = {chi2:.4} (ones = {ones}/{n}, \
+         expected ~{:.0}); measurement distribution is not 50/50 at p=0.05",
+        f64::from(n) / 2.0,
     );
 }
 
@@ -105,6 +114,51 @@ fn test_bell_state_measurement_correlation() {
         sim.release(q0);
         sim.release(q1);
     }
+}
+
+/// Verify that Bell state measurements produce BOTH outcomes (|00> and |11>)
+/// over repeated trials, not just one.
+#[test]
+fn test_bell_state_both_outcomes_observed() {
+    let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).expect("GPU sim should init");
+
+    let mut saw_zero = false;
+    let mut saw_one = false;
+
+    for _ in 0..200 {
+        let q0 = sim.allocate().expect("allocation should succeed");
+        let q1 = sim.allocate().expect("allocation should succeed");
+
+        sim.h(q0);
+        sim.mcx(&[q0], q1);
+
+        let r0 = sim.measure(q0).expect("measurement should succeed");
+        let r1 = sim.measure(q1).expect("measurement should succeed");
+        assert_eq!(r0, r1, "Bell pair measurements must be correlated");
+
+        if r0 {
+            saw_one = true;
+            sim.x(q0);
+            sim.x(q1);
+        } else {
+            saw_zero = true;
+        }
+        sim.release(q0);
+        sim.release(q1);
+
+        if saw_zero && saw_one {
+            break;
+        }
+    }
+
+    assert!(
+        saw_zero,
+        "should observe |00> outcome at least once in 200 trials"
+    );
+    assert!(
+        saw_one,
+        "should observe |11> outcome at least once in 200 trials"
+    );
 }
 
 #[test]

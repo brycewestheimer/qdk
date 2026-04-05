@@ -143,6 +143,7 @@ impl GpuQuantumSim {
                 Ok(id)
             }
             Some(max_bit) => {
+                // Bit positions are bounded by GPU memory (~30 max); truncation to u32 is safe.
                 #[allow(clippy::cast_possible_truncation)]
                 let required_qubits = (max_bit + 1) as u32;
                 if self.state.num_qubits() == 0 {
@@ -432,6 +433,7 @@ impl GpuQuantumSim {
             .qubit_map
             .bit_position(id)
             .expect("qubit should be allocated");
+        // Bit position fits in u32; shift is safe.
         #[allow(clippy::cast_possible_truncation)]
         let measure_mask = 1u32 << bit;
         let num_qubits = self.state.num_qubits();
@@ -533,7 +535,7 @@ impl GpuQuantumSim {
     /// # Errors
     ///
     /// Returns a `GpuSimError` if the probability readback fails.
-    pub fn joint_probability(&mut self, ids: &[usize]) -> Result<f64, GpuSimError> {
+    pub fn joint_probability(&self, ids: &[usize]) -> Result<f64, GpuSimError> {
         let measure_mask = self.build_measure_mask(ids);
         let num_qubits = self.state.num_qubits();
 
@@ -555,11 +557,12 @@ impl GpuQuantumSim {
     /// # Errors
     ///
     /// Returns a `GpuSimError` if the probability readback fails.
-    pub fn qubit_is_zero(&mut self, id: usize) -> Result<bool, GpuSimError> {
+    pub fn qubit_is_zero(&self, id: usize) -> Result<bool, GpuSimError> {
         let bit = self
             .qubit_map
             .bit_position(id)
             .expect("qubit should be allocated");
+        // Bit position fits in u32; shift is safe.
         #[allow(clippy::cast_possible_truncation)]
         let measure_mask = 1u32 << bit;
         let num_qubits = self.state.num_qubits();
@@ -732,6 +735,7 @@ impl GpuQuantumSim {
 
     /// Resolves a user-facing qubit ID to a GPU bit position.
     fn resolve_bit(&self, id: usize) -> u32 {
+        // Bit positions are bounded by GPU memory (~30 max); truncation to u32 is safe.
         #[allow(clippy::cast_possible_truncation)]
         let bit = self
             .qubit_map
@@ -872,6 +876,7 @@ impl GpuQuantumSim {
 /// This test is called once during `GpuQuantumSim::new()` when `f64_emulation`
 /// is active. Returns `Err(GpuSimError::FmaNotFused)` if `fma` is not fused.
 #[cfg(feature = "f64_emulation")]
+// FMA verification is a single cohesive GPU self-test; splitting would fragment the logic.
 #[allow(clippy::too_many_lines)]
 fn verify_fma_is_fused(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<(), GpuSimError> {
     const FMA_TEST_SHADER: &str = r"

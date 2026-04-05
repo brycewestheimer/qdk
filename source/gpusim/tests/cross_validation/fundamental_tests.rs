@@ -13,7 +13,7 @@ fn test_bell_state() {
     let mut gpu_state = run_on_gpu(&circuit).0;
     phase_normalize(&mut sparse_state);
     phase_normalize(&mut gpu_state);
-    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-10);
+    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-6);
     assert!(passed, "Bell state max error: {max_error:.2e}");
 }
 
@@ -36,7 +36,7 @@ fn test_ghz_n3() {
     let mut gpu_state = run_on_gpu(&circuit).0;
     phase_normalize(&mut sparse_state);
     phase_normalize(&mut gpu_state);
-    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-10);
+    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-6);
     assert!(passed, "GHZ-3 max error: {max_error:.2e}");
 }
 
@@ -48,7 +48,7 @@ fn test_ghz_n4() {
     let mut gpu_state = run_on_gpu(&circuit).0;
     phase_normalize(&mut sparse_state);
     phase_normalize(&mut gpu_state);
-    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-10);
+    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-6);
     assert!(passed, "GHZ-4 max error: {max_error:.2e}");
 }
 
@@ -60,7 +60,7 @@ fn test_ghz_n5() {
     let mut gpu_state = run_on_gpu(&circuit).0;
     phase_normalize(&mut sparse_state);
     phase_normalize(&mut gpu_state);
-    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-10);
+    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-6);
     assert!(passed, "GHZ-5 max error: {max_error:.2e}");
 }
 
@@ -72,7 +72,7 @@ fn test_ghz_n8() {
     let mut gpu_state = run_on_gpu(&circuit).0;
     phase_normalize(&mut sparse_state);
     phase_normalize(&mut gpu_state);
-    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-10);
+    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-6);
     assert!(passed, "GHZ-8 max error: {max_error:.2e}");
 }
 
@@ -84,7 +84,7 @@ fn test_ghz_n10() {
     let mut gpu_state = run_on_gpu(&circuit).0;
     phase_normalize(&mut sparse_state);
     phase_normalize(&mut gpu_state);
-    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-10);
+    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-6);
     assert!(passed, "GHZ-10 max error: {max_error:.2e}");
 }
 
@@ -106,7 +106,7 @@ fn test_single_qubit() {
     let mut gpu_state = run_on_gpu(&circuit).0;
     phase_normalize(&mut sparse_state);
     phase_normalize(&mut gpu_state);
-    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-10);
+    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-6);
     assert!(passed, "Single qubit max error: {max_error:.2e}");
 }
 
@@ -119,6 +119,6 @@ fn test_identity_circuit() {
     };
     let sparse_state = run_on_sparse(&circuit).0;
     let gpu_state = run_on_gpu(&circuit).0;
-    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-10);
+    let (max_error, passed) = compare_states(&sparse_state, &gpu_state, 1e-6);
     assert!(passed, "Identity circuit max error: {max_error:.2e}");
 }

@@ -21,7 +21,7 @@ rustc-hash = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 
-[target.'cfg(not(any(target_os = "windows")))'.dependencies]
+[target.'cfg(not(target_os = "windows"))'.dependencies]
 pyo3 = { workspace = true, optional = true, features = [
     "abi3-py310",
     "extension-module",
@@ -29,7 +29,7 @@ pyo3 = { workspace = true, optional = true, features = [
     "num-complex",
 ] }
 
-[target.'cfg(any(target_os = "windows"))'.dependencies]
+[target.'cfg(target_os = "windows")'.dependencies]
 pyo3 = { workspace = true, optional = true, features = [
     "abi3-py310",
     "extension-module",

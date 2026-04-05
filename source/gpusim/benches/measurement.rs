@@ -75,6 +75,11 @@ fn joint_measurement(c: &mut Criterion) {
     group.finish();
 }
 
+// Sample size 50: measurement operations (probability computation + collapse)
+// are moderately expensive due to the GPU-CPU readback round trip (~100us-1ms).
+// 50 samples provide good variance estimates while keeping total bench time
+// under 2 minutes. Warm-up (3s) and measurement time (5s) match the single-gate
+// configuration since individual measurement latencies are similar.
 #[cfg(feature = "gpu-tests")]
 criterion_group!(
     name = benches;

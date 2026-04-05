@@ -109,6 +109,15 @@ impl GpuDevice {
                 DeviceType::IntegratedGpu => 4,
                 _ => 0,
             };
+            // On Windows, DX12 is the native API and often has better driver
+            // support than Vulkan-over-D3D12 (e.g., Dozen). Score them equally
+            // and let buffer-size tiebreakers decide.
+            #[cfg(target_os = "windows")]
+            let backend_score = match info.backend {
+                wgpu::Backend::Vulkan | wgpu::Backend::Metal | wgpu::Backend::Dx12 => 2,
+                _ => 0,
+            };
+            #[cfg(not(target_os = "windows"))]
             let backend_score = match info.backend {
                 wgpu::Backend::Vulkan | wgpu::Backend::Metal => 2,
                 wgpu::Backend::Dx12 => 1,

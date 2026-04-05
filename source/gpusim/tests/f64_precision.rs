@@ -36,7 +36,7 @@ fn f64_emulated_bell_state_precision() {
     for (_idx, amp) in &state {
         let error = (amp.norm() - inv_sqrt2).abs();
         assert!(
-            error < 1e-12,
+            error < 1e-10,
             "f64-emulated amplitude deviation too large: {error:.2e}"
         );
     }

@@ -245,13 +245,18 @@ fn precision_characterization_matrix() {
         worst.2, worst.0, worst.1
     );
 
-    // Soft assertion: fidelity should remain reasonable even at worst case.
-    // f32 with depth 5000 at 20 qubits may degrade, but should not be catastrophic.
-    // This threshold may need tuning after first run.
+    // Hard assertion: fidelity must stay above 0.99 for all configurations.
+    //
+    // f32 arithmetic loses ~7 decimal digits per operation, but quantum gate
+    // unitaries preserve normalization structurally. Even at depth 5000, the
+    // fidelity degradation should be gradual (trace distance grows as
+    // O(sqrt(depth) * eps)). A threshold of 0.99 catches catastrophic
+    // precision failures while allowing normal f32 drift.
     for &(q, d, f) in &all_fidelities {
-        if f < 0.9 {
-            println!("WARNING: Very low fidelity {f:.6} at {q} qubits, depth {d}");
-        }
+        assert!(
+            f >= 0.99,
+            "Fidelity {f:.6} at {q} qubits, depth {d} fell below 0.99 threshold"
+        );
     }
 }
 
