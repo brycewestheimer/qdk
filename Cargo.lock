@@ -2053,6 +2053,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "qdk-gpu-sim"
+version = "0.0.0"
+dependencies = [
+ "approx",
+ "bytemuck",
+ "criterion 0.8.2",
+ "futures",
+ "log",
+ "num-bigint",
+ "num-complex",
+ "num-traits",
+ "pyo3",
+ "quantum-sparse-sim",
+ "rand 0.8.5",
+ "rustc-hash",
+ "thiserror 2.0.18",
+ "wgpu",
+]
+
+[[package]]
 name = "qdk_simulators"
 version = "0.0.0"
 dependencies = [
@@ -2209,6 +2229,7 @@ dependencies = [
  "num-bigint",
  "num-complex",
  "num-traits",
+ "qdk-gpu-sim",
  "qdk_simulators",
  "qsc_data_structures",
  "qsc_fir",

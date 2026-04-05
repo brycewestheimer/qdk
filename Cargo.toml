@@ -30,6 +30,7 @@ members = [
     "source/resource_estimator",
     "source/samples_test",
     "source/wasm",
+    "source/gpusim",
 ]
 resolver = "2"
 

@@ -1,0 +1,72 @@
+[package]
+name = "qdk-gpu-sim"
+description = "GPU-accelerated dense state vector quantum simulator using wgpu compute shaders"
+
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wgpu = { workspace = true }
+futures = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+num-complex = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+rand = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+pyo3 = { workspace = true, optional = true, features = [
+    "abi3-py310",
+    "extension-module",
+    "num-bigint",
+    "num-complex",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+pyo3 = { workspace = true, optional = true, features = [
+    "abi3-py310",
+    "extension-module",
+    "generate-import-lib",
+    "num-bigint",
+    "num-complex",
+] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+approx = "0.5"
+quantum-sparse-sim = { workspace = true }
+
+[features]
+default = []
+gpu-tests = []
+f64_emulation = []
+python = ["pyo3"]
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[package.metadata.maturin]
+name = "qdk_gpu_sim"
+
+[[bench]]
+name = "single_gate"
+harness = false
+
+[[bench]]
+name = "circuit"
+harness = false
+
+[[bench]]
+name = "measurement"
+harness = false
