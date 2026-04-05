@@ -7,8 +7,6 @@
 //
 // For 0 controls, the host dispatches the single-qubit kernel instead.
 // This shader is only invoked when there is at least 1 control.
-//
-// Dispatch: ceil(2^(num_qubits - 1) / 256) workgroups.
 
 struct MultiControlledParams {
     // 2x2 unitary matrix: [[a, b], [c, d]]
@@ -26,10 +24,9 @@ struct MultiControlledParams {
     // Total number of qubits in the system.
     num_qubits: u32,
     // Bitmask of control qubit bit positions.
-    // Bit i is set iff the qubit at bit position i is a control.
     control_mask: u32,
-    // Padding for 16-byte alignment.
-    _pad: u32,
+    // Number of workgroups dispatched (for grid-stride loop).
+    num_workgroups: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> state: array<f32>;
@@ -44,44 +41,40 @@ fn cmul(a_re: f32, a_im: f32, b_re: f32, b_im: f32) -> vec2<f32> {
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let thread_id = gid.x;
     let num_pairs = 1u << (params.num_qubits - 1u);
+    let total_threads = 256u * params.num_workgroups;
 
-    if (thread_id >= num_pairs) {
-        return;
+    var thread_id = gid.x;
+    while (thread_id < num_pairs) {
+        // Compute the two indices (identical to single-qubit kernel).
+        // Insert a 0-bit at position target_bit.
+        let low_mask = (1u << params.target_bit) - 1u;
+        let low_bits = thread_id & low_mask;
+        let high_bits = (thread_id >> params.target_bit) << (params.target_bit + 1u);
+        let idx0 = high_bits | low_bits;                    // target_bit is 0
+        let idx1 = idx0 | (1u << params.target_bit);        // target_bit is 1
+
+        // Control check: all bits in control_mask must be set in idx0.
+        if ((idx0 & params.control_mask) == params.control_mask) {
+            // Load the two amplitudes.
+            let s0_re = state[idx0 * 2u];
+            let s0_im = state[idx0 * 2u + 1u];
+            let s1_re = state[idx1 * 2u];
+            let s1_im = state[idx1 * 2u + 1u];
+
+            // Apply the 2x2 unitary: [a b; c d] * [s0; s1]
+            let new0 = cmul(params.mat_a_re, params.mat_a_im, s0_re, s0_im)
+                     + cmul(params.mat_b_re, params.mat_b_im, s1_re, s1_im);
+            let new1 = cmul(params.mat_c_re, params.mat_c_im, s0_re, s0_im)
+                     + cmul(params.mat_d_re, params.mat_d_im, s1_re, s1_im);
+
+            // Write back.
+            state[idx0 * 2u] = new0.x;
+            state[idx0 * 2u + 1u] = new0.y;
+            state[idx1 * 2u] = new1.x;
+            state[idx1 * 2u + 1u] = new1.y;
+        }
+
+        thread_id += total_threads;
     }
-
-    // Compute the two indices (identical to single-qubit kernel).
-    // Insert a 0-bit at position target_bit.
-    let low_mask = (1u << params.target_bit) - 1u;
-    let low_bits = thread_id & low_mask;
-    let high_bits = (thread_id >> params.target_bit) << (params.target_bit + 1u);
-    let idx0 = high_bits | low_bits;                    // target_bit is 0
-    let idx1 = idx0 | (1u << params.target_bit);        // target_bit is 1
-
-    // Control check: all bits in control_mask must be set in idx0.
-    // Since idx0 and idx1 differ only at target_bit (which is NOT in
-    // control_mask by the host-enforced invariant), this single check
-    // covers both indices.
-    if ((idx0 & params.control_mask) != params.control_mask) {
-        return;
-    }
-
-    // Load the two amplitudes.
-    let s0_re = state[idx0 * 2u];
-    let s0_im = state[idx0 * 2u + 1u];
-    let s1_re = state[idx1 * 2u];
-    let s1_im = state[idx1 * 2u + 1u];
-
-    // Apply the 2x2 unitary: [a b; c d] * [s0; s1]
-    let new0 = cmul(params.mat_a_re, params.mat_a_im, s0_re, s0_im)
-             + cmul(params.mat_b_re, params.mat_b_im, s1_re, s1_im);
-    let new1 = cmul(params.mat_c_re, params.mat_c_im, s0_re, s0_im)
-             + cmul(params.mat_d_re, params.mat_d_im, s1_re, s1_im);
-
-    // Write back.
-    state[idx0 * 2u] = new0.x;
-    state[idx0 * 2u + 1u] = new0.y;
-    state[idx1 * 2u] = new1.x;
-    state[idx1 * 2u + 1u] = new1.y;
 }

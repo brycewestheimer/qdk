@@ -4,6 +4,12 @@ use crate::gpu::state_buffer::StateBuffer;
 #[cfg(feature = "f64_emulation")]
 use crate::precision;
 
+/// Maximum number of workgroups that can be dispatched in a single dimension.
+///
+/// Per the WebGPU spec, `maxComputeWorkgroupsPerDimension` is at least 65535.
+/// Gate shaders use grid-stride loops to handle work beyond this limit.
+const MAX_WORKGROUPS: u32 = 65535;
+
 /// GPU-side gate parameters matching the WGSL `GateParams` struct layout.
 ///
 /// Must be `#[repr(C)]` and `bytemuck::Pod` to be safely cast to raw bytes
@@ -34,31 +40,33 @@ pub struct GateParams {
     pub target_bit: u32,
     /// Total number of qubits in the state vector.
     pub num_qubits: u32,
+    /// Number of workgroups dispatched (for grid-stride loop).
+    pub num_workgroups: u32,
     /// Padding for 16-byte alignment.
-    _pad0: u32,
-    /// Padding for 16-byte alignment.
-    _pad1: u32,
+    _pad: u32,
 }
 
 /// GPU-side parameters for the two-qubit gate shader.
 ///
 /// Layout matches `TwoQubitParams` in `two_qubit_gate.wgsl`.
+/// The matrix is packed as `array<vec4<f32>, 8>` in WGSL to satisfy the
+/// 16-byte uniform array element stride requirement.
 ///
-/// Size: 144 bytes (32 f32 matrix + 4 u32 fields).
+/// Size: 144 bytes (128 matrix + 16 fields).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TwoQubitGateParams {
-    /// 4x4 unitary matrix as 32 f32 values (16 complex numbers, row-major).
-    /// `mat[(row * 4 + col) * 2]` = real, `mat[(row * 4 + col) * 2 + 1]` = imag.
-    pub mat: [f32; 32],
+    /// 4x4 unitary matrix packed as 8 vec4 chunks.
+    /// Logical element `i` is at `mat[i / 4][i % 4]`.
+    pub mat: [[f32; 4]; 8],
     /// Bit position of the first qubit (qubit A).
     pub bit_a: u32,
     /// Bit position of the second qubit (qubit B).
     pub bit_b: u32,
     /// Total number of qubits in the system.
     pub num_qubits: u32,
-    /// Padding for 16-byte alignment.
-    _pad: u32,
+    /// Number of workgroups dispatched (for grid-stride loop).
+    pub num_workgroups: u32,
 }
 
 /// GPU-side parameters for the multi-controlled gate shader.
@@ -91,14 +99,14 @@ pub struct MultiControlledGateParams {
     pub num_qubits: u32,
     /// Bitmask of control qubit bit positions.
     pub control_mask: u32,
-    /// Padding for 16-byte alignment.
-    _pad: u32,
+    /// Number of workgroups dispatched (for grid-stride loop).
+    pub num_workgroups: u32,
 }
 
 /// GPU-side single-qubit gate params for f64 emulation mode.
 ///
 /// Layout matches the f64 WGSL `GateParams` struct: header fields first,
-/// then the DS-encoded 2x2 matrix (16 f32s = 4 complex entries * 4 f32s).
+/// then the DS-encoded 2x2 matrix packed as `array<vec4<f32>, 4>`.
 ///
 /// Size: 80 bytes (16 header + 64 matrix).
 #[cfg(feature = "f64_emulation")]
@@ -107,10 +115,10 @@ pub struct MultiControlledGateParams {
 pub struct GateParamsF64 {
     pub target_bit: u32,
     pub num_qubits: u32,
-    _pad0: u32,
-    _pad1: u32,
-    /// 2x2 complex matrix in DS format (4 entries, 4 f32s each).
-    pub matrix: [f32; 16],
+    pub num_workgroups: u32,
+    _pad: u32,
+    /// 2x2 complex matrix in DS format, packed as 4 vec4 chunks.
+    pub matrix: [[f32; 4]; 4],
 }
 
 /// GPU-side two-qubit gate params for f64 emulation mode.
@@ -123,9 +131,9 @@ pub struct TwoQubitGateParamsF64 {
     pub bit_a: u32,
     pub bit_b: u32,
     pub num_qubits: u32,
-    _pad: u32,
-    /// 4x4 complex matrix in DS format (16 entries, 4 f32s each).
-    pub mat: [f32; 64],
+    pub num_workgroups: u32,
+    /// 4x4 complex matrix in DS format, packed as 16 vec4 chunks.
+    pub mat: [[f32; 4]; 16],
 }
 
 /// GPU-side multi-controlled gate params for f64 emulation mode.
@@ -138,9 +146,9 @@ pub struct MultiControlledGateParamsF64 {
     pub target_bit: u32,
     pub num_qubits: u32,
     pub control_mask: u32,
-    _pad: u32,
-    /// 2x2 complex matrix in DS format (4 entries, 4 f32s each).
-    pub matrix: [f32; 16],
+    pub num_workgroups: u32,
+    /// 2x2 complex matrix in DS format, packed as 4 vec4 chunks.
+    pub matrix: [[f32; 4]; 4],
 }
 
 /// GPU-side collapse params for f64 emulation mode.
@@ -153,8 +161,7 @@ pub struct CollapseParamsF64 {
     pub measure_mask: u32,
     pub measured_value: u32,
     pub num_qubits: u32,
-    #[allow(clippy::pub_underscore_fields)]
-    pub _pad: u32,
+    pub num_workgroups: u32,
     /// DS normalization factor (hi, lo).
     pub norm_hi: f32,
     pub norm_lo: f32,
@@ -165,34 +172,41 @@ pub struct CollapseParamsF64 {
 }
 
 /// Encode a `Mat2x2` (4 complex entries as `(f32, f32)` tuples) into DS format
-/// for GPU upload: 4 entries * 4 f32s (`re_hi`, `re_lo`, `im_hi`, `im_lo`) = 16 f32s.
+/// packed as `[[f32; 4]; 4]` for vec4 uniform upload.
+///
+/// Each matrix entry becomes 4 f32s: `[re_hi, re_lo, im_hi, im_lo]`.
+/// This layout maps directly to `array<vec4<f32>, 4>` in WGSL.
 #[cfg(feature = "f64_emulation")]
-fn encode_2x2_ds(gate: &Mat2x2) -> [f32; 16] {
-    let mut out = [0.0f32; 16];
+fn encode_2x2_ds(gate: &Mat2x2) -> [[f32; 4]; 4] {
+    let mut out = [[0.0f32; 4]; 4];
     for (i, &(re, im)) in gate.iter().enumerate() {
         let (re_hi, re_lo) = precision::to_ds(f64::from(re));
         let (im_hi, im_lo) = precision::to_ds(f64::from(im));
-        out[i * 4] = re_hi;
-        out[i * 4 + 1] = re_lo;
-        out[i * 4 + 2] = im_hi;
-        out[i * 4 + 3] = im_lo;
+        out[i] = [re_hi, re_lo, im_hi, im_lo];
     }
     out
 }
 
-/// Encode a `Mat4x4` (16 complex entries) into DS format for GPU upload: 64 f32s.
+/// Encode a `Mat4x4` (16 complex entries) into DS format packed as
+/// `[[f32; 4]; 16]` for vec4 uniform upload.
 #[cfg(feature = "f64_emulation")]
-fn encode_4x4_ds(gate: &Mat4x4) -> [f32; 64] {
-    let mut out = [0.0f32; 64];
+fn encode_4x4_ds(gate: &Mat4x4) -> [[f32; 4]; 16] {
+    let mut out = [[0.0f32; 4]; 16];
     for (i, &(re, im)) in gate.iter().enumerate() {
         let (re_hi, re_lo) = precision::to_ds(f64::from(re));
         let (im_hi, im_lo) = precision::to_ds(f64::from(im));
-        out[i * 4] = re_hi;
-        out[i * 4 + 1] = re_lo;
-        out[i * 4 + 2] = im_hi;
-        out[i * 4 + 3] = im_lo;
+        out[i] = [re_hi, re_lo, im_hi, im_lo];
     }
     out
+}
+
+/// Computes a capped workgroup count for GPU dispatch.
+///
+/// Returns `min(required.div_ceil(256), MAX_WORKGROUPS)`.
+fn capped_workgroup_count(num_items: u64) -> u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let needed = num_items.div_ceil(256).min(u64::from(MAX_WORKGROUPS)) as u32;
+    needed
 }
 
 /// Dispatches a single-qubit gate operation to the GPU.
@@ -201,7 +215,7 @@ fn encode_4x4_ds(gate: &Mat4x4) -> [f32; 64] {
 /// builds a bind group, records a compute pass, and submits it to the queue.
 ///
 /// The state vector is modified in-place on the GPU. No CPU synchronization
-/// occurs — the operation is fully asynchronous from the CPU's perspective,
+/// occurs -- the operation is fully asynchronous from the CPU's perspective,
 /// but wgpu ensures sequential execution of submitted commands.
 pub fn dispatch_single_qubit_gate(
     device: &wgpu::Device,
@@ -212,6 +226,9 @@ pub fn dispatch_single_qubit_gate(
     target_bit: u32,
     num_qubits: u32,
 ) {
+    let num_pairs = 1u64 << (num_qubits - 1);
+    let workgroup_count = capped_workgroup_count(num_pairs);
+
     #[cfg(not(feature = "f64_emulation"))]
     let param_buffer = {
         let params = GateParams {
@@ -225,8 +242,8 @@ pub fn dispatch_single_qubit_gate(
             gate_im3: gate[3].1,
             target_bit,
             num_qubits,
-            _pad0: 0,
-            _pad1: 0,
+            num_workgroups: workgroup_count,
+            _pad: 0,
         };
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gate_params"),
@@ -243,8 +260,8 @@ pub fn dispatch_single_qubit_gate(
         let params = GateParamsF64 {
             target_bit,
             num_qubits,
-            _pad0: 0,
-            _pad1: 0,
+            num_workgroups: workgroup_count,
+            _pad: 0,
             matrix: encode_2x2_ds(gate),
         };
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -282,11 +299,6 @@ pub fn dispatch_single_qubit_gate(
         });
         pass.set_pipeline(pipeline_cache.single_qubit_pipeline());
         pass.set_bind_group(0, &bind_group, &[]);
-
-        // 2^(N-1) amplitude pairs, 256 threads per workgroup
-        let num_pairs = 1u64 << (num_qubits - 1);
-        #[allow(clippy::cast_possible_truncation)]
-        let workgroup_count = num_pairs.div_ceil(256) as u32;
         pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
     queue.submit(std::iter::once(encoder.finish()));
@@ -296,8 +308,8 @@ pub fn dispatch_single_qubit_gate(
 ///
 /// Applies an arbitrary 4x4 unitary matrix to the qubit pair at bit
 /// positions `bit_a` and `bit_b`. The matrix is provided in the crate's
-/// `Mat4x4` format (16 complex tuples) and flattened to 32 f32 values
-/// for GPU upload.
+/// `Mat4x4` format (16 complex tuples) and flattened to `[[f32; 4]; 8]`
+/// for GPU upload (vec4-packed to match WGSL uniform layout).
 ///
 /// # Panics
 /// Panics if `bit_a == bit_b` or `num_qubits < 2`.
@@ -318,20 +330,28 @@ pub fn dispatch_two_qubit_gate(
         "need at least 2 qubits for a two-qubit gate"
     );
 
+    let num_groups = 1u64 << (num_qubits - 2);
+    let workgroup_count = capped_workgroup_count(num_groups);
+
     #[cfg(not(feature = "f64_emulation"))]
     let param_buffer = {
-        // Flatten Mat4x4 [(f32, f32); 16] to [f32; 32]
-        let mut mat = [0.0f32; 32];
+        // Flatten Mat4x4 [(f32, f32); 16] to [[f32; 4]; 8] (vec4-packed)
+        let mut flat = [0.0f32; 32];
         for (i, &(re, im)) in gate.iter().enumerate() {
-            mat[i * 2] = re;
-            mat[i * 2 + 1] = im;
+            flat[i * 2] = re;
+            flat[i * 2 + 1] = im;
+        }
+        // Reinterpret [f32; 32] as [[f32; 4]; 8]
+        let mut mat = [[0.0f32; 4]; 8];
+        for (chunk_idx, chunk) in flat.chunks_exact(4).enumerate() {
+            mat[chunk_idx] = [chunk[0], chunk[1], chunk[2], chunk[3]];
         }
         let params = TwoQubitGateParams {
             mat,
             bit_a,
             bit_b,
             num_qubits,
-            _pad: 0,
+            num_workgroups: workgroup_count,
         };
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("two_qubit_params"),
@@ -349,7 +369,7 @@ pub fn dispatch_two_qubit_gate(
             bit_a,
             bit_b,
             num_qubits,
-            _pad: 0,
+            num_workgroups: workgroup_count,
             mat: encode_4x4_ds(gate),
         };
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -387,11 +407,6 @@ pub fn dispatch_two_qubit_gate(
         });
         pass.set_pipeline(pipeline_cache.two_qubit_pipeline());
         pass.set_bind_group(0, &bind_group, &[]);
-
-        // 2^(N-2) groups of 4 amplitudes, 256 threads per workgroup
-        let num_groups = 1u64 << (num_qubits - 2);
-        #[allow(clippy::cast_possible_truncation)]
-        let workgroup_count = num_groups.div_ceil(256) as u32;
         pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
     queue.submit(std::iter::once(encoder.finish()));
@@ -421,6 +436,9 @@ pub fn dispatch_multi_controlled_gate(
         "target_bit must not be set in control_mask"
     );
 
+    let num_pairs = 1u64 << (num_qubits - 1);
+    let workgroup_count = capped_workgroup_count(num_pairs);
+
     #[cfg(not(feature = "f64_emulation"))]
     let param_buffer = {
         let params = MultiControlledGateParams {
@@ -435,7 +453,7 @@ pub fn dispatch_multi_controlled_gate(
             target_bit,
             num_qubits,
             control_mask,
-            _pad: 0,
+            num_workgroups: workgroup_count,
         };
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("multi_controlled_params"),
@@ -453,7 +471,7 @@ pub fn dispatch_multi_controlled_gate(
             target_bit,
             num_qubits,
             control_mask,
-            _pad: 0,
+            num_workgroups: workgroup_count,
             matrix: encode_2x2_ds(gate),
         };
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -491,11 +509,6 @@ pub fn dispatch_multi_controlled_gate(
         });
         pass.set_pipeline(pipeline_cache.multi_controlled_pipeline());
         pass.set_bind_group(0, &bind_group, &[]);
-
-        // Same dispatch size as single-qubit: 2^(N-1) pairs
-        let num_pairs = 1u64 << (num_qubits - 1);
-        #[allow(clippy::cast_possible_truncation)]
-        let workgroup_count = num_pairs.div_ceil(256) as u32;
         pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
     queue.submit(std::iter::once(encoder.finish()));
@@ -533,10 +546,22 @@ pub struct CollapseParams {
     pub normalization_factor: f32,
     /// Total number of qubits.
     pub num_qubits: u32,
+    /// Number of workgroups dispatched (for grid-stride loop).
+    pub num_workgroups: u32,
+    /// Padding for 16-byte alignment.
+    #[allow(clippy::pub_underscore_fields)]
+    pub _pad0: u32,
+    #[allow(clippy::pub_underscore_fields)]
+    pub _pad1: u32,
+    #[allow(clippy::pub_underscore_fields)]
+    pub _pad2: u32,
 }
 
+const _: () = assert!(std::mem::size_of::<GateParams>() == 48);
+const _: () = assert!(std::mem::size_of::<TwoQubitGateParams>() == 144);
+const _: () = assert!(std::mem::size_of::<MultiControlledGateParams>() == 48);
 const _: () = assert!(std::mem::size_of::<MeasureParams>() == 16);
-const _: () = assert!(std::mem::size_of::<CollapseParams>() == 16);
+const _: () = assert!(std::mem::size_of::<CollapseParams>() == 32);
 
 #[cfg(feature = "f64_emulation")]
 const _: () = assert!(std::mem::size_of::<GateParamsF64>() == 80);
@@ -558,7 +583,6 @@ mod tests {
 
     #[test]
     fn gate_params_alignment_is_correct() {
-        // Uniform buffers require 16-byte alignment. 48 is a multiple of 16.
         assert_eq!(std::mem::size_of::<GateParams>() % 16, 0);
     }
 
@@ -593,12 +617,30 @@ mod tests {
     }
 
     #[test]
-    fn collapse_params_size_is_16_bytes() {
-        assert_eq!(std::mem::size_of::<CollapseParams>(), 16);
+    fn collapse_params_size_is_32_bytes() {
+        assert_eq!(std::mem::size_of::<CollapseParams>(), 32);
     }
 
     #[test]
     fn collapse_params_alignment_is_correct() {
         assert_eq!(std::mem::size_of::<CollapseParams>() % 16, 0);
+    }
+
+    #[test]
+    fn capped_workgroup_count_below_limit() {
+        // 20 qubits: 2^19 pairs / 256 = 2048 workgroups (below 65535)
+        assert_eq!(capped_workgroup_count(1u64 << 19), 2048);
+    }
+
+    #[test]
+    fn capped_workgroup_count_at_limit() {
+        // 25 qubits: 2^24 pairs / 256 = 65536 > 65535, should cap
+        assert_eq!(capped_workgroup_count(1u64 << 24), 65535);
+    }
+
+    #[test]
+    fn capped_workgroup_count_well_above_limit() {
+        // 30 qubits: 2^29 pairs / 256 = 2,097,152 >> 65535, should cap
+        assert_eq!(capped_workgroup_count(1u64 << 29), 65535);
     }
 }

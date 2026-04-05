@@ -9,9 +9,11 @@ struct TwoQubitParams {
     bit_a: u32,
     bit_b: u32,
     num_qubits: u32,
-    _pad: u32,
+    num_workgroups: u32,
     // 4x4 complex matrix in DS format: 16 entries * 4 f32s each = 64 f32s.
-    mat: array<f32, 64>,
+    // Packed as array<vec4<f32>, 16> for uniform buffer layout compliance.
+    // Each vec4 holds one matrix entry: (re_hi, re_lo, im_hi, im_lo).
+    mat: array<vec4<f32>, 16>,
 };
 
 @group(0) @binding(0) var<storage, read_write> state: array<f32>;
@@ -34,10 +36,11 @@ fn store_amplitude(idx: u32, re: DS, im: DS) {
 }
 
 fn load_matrix_entry(entry_idx: u32) -> array<DS, 2> {
-    let base = entry_idx * 4u;
+    // Each entry is one vec4: (re_hi, re_lo, im_hi, im_lo).
+    let v = params.mat[entry_idx];
     return array<DS, 2>(
-        DS(params.mat[base], params.mat[base + 1u]),
-        DS(params.mat[base + 2u], params.mat[base + 3u])
+        DS(v.x, v.y),
+        DS(v.z, v.w)
     );
 }
 
@@ -55,49 +58,50 @@ fn mat_row_dot(row: u32, amps: array<array<DS, 2>, 4>) -> array<DS, 2> {
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let thread_id = gid.x;
     let num_groups = 1u << (params.num_qubits - 2u);
+    let total_threads = 256u * params.num_workgroups;
 
-    if (thread_id >= num_groups) {
-        return;
-    }
+    var thread_id = gid.x;
+    while (thread_id < num_groups) {
+        // Double-bit-insertion: identical to f32 version.
+        let lo = min(params.bit_a, params.bit_b);
+        let hi = max(params.bit_a, params.bit_b);
 
-    // Double-bit-insertion: identical to f32 version.
-    let lo = min(params.bit_a, params.bit_b);
-    let hi = max(params.bit_a, params.bit_b);
+        let lo_mask = (1u << lo) - 1u;
+        var idx = (thread_id & lo_mask) | ((thread_id & ~lo_mask) << 1u);
 
-    let lo_mask = (1u << lo) - 1u;
-    var idx = (thread_id & lo_mask) | ((thread_id & ~lo_mask) << 1u);
+        let hi_mask = (1u << hi) - 1u;
+        idx = (idx & hi_mask) | ((idx & ~hi_mask) << 1u);
 
-    let hi_mask = (1u << hi) - 1u;
-    idx = (idx & hi_mask) | ((idx & ~hi_mask) << 1u);
+        let idx00 = idx;
+        let idx_lo = idx | (1u << lo);
+        let idx_hi = idx | (1u << hi);
+        let idx11 = idx | (1u << lo) | (1u << hi);
 
-    let idx00 = idx;
-    let idx_lo = idx | (1u << lo);
-    let idx_hi = idx | (1u << hi);
-    let idx11 = idx | (1u << lo) | (1u << hi);
+        // Map to canonical 2-qubit basis ordering |q_a q_b>.
+        var indices: array<u32, 4>;
+        if (params.bit_a < params.bit_b) {
+            indices = array<u32, 4>(idx00, idx_hi, idx_lo, idx11);
+        } else {
+            indices = array<u32, 4>(idx00, idx_lo, idx_hi, idx11);
+        }
 
-    // Map to canonical 2-qubit basis ordering |q_a q_b>.
-    var indices: array<u32, 4>;
-    if (params.bit_a < params.bit_b) {
-        indices = array<u32, 4>(idx00, idx_hi, idx_lo, idx11);
-    } else {
-        indices = array<u32, 4>(idx00, idx_lo, idx_hi, idx11);
-    }
+        // Load the 4 amplitudes.
+        var amps: array<array<DS, 2>, 4>;
+        for (var i: u32 = 0u; i < 4u; i++) {
+            amps[i] = load_amplitude(indices[i]);
+        }
 
-    // Load the 4 amplitudes.
-    var amps: array<array<DS, 2>, 4>;
-    for (var i: u32 = 0u; i < 4u; i++) {
-        amps[i] = load_amplitude(indices[i]);
-    }
+        // Apply the 4x4 matrix and store results.
+        // Must compute all results before writing to avoid read-after-write hazard.
+        var results: array<array<DS, 2>, 4>;
+        for (var row: u32 = 0u; row < 4u; row++) {
+            results[row] = mat_row_dot(row, amps);
+        }
+        for (var i: u32 = 0u; i < 4u; i++) {
+            store_amplitude(indices[i], results[i][0], results[i][1]);
+        }
 
-    // Apply the 4x4 matrix and store results.
-    // Must compute all results before writing to avoid read-after-write hazard.
-    var results: array<array<DS, 2>, 4>;
-    for (var row: u32 = 0u; row < 4u; row++) {
-        results[row] = mat_row_dot(row, amps);
-    }
-    for (var i: u32 = 0u; i < 4u; i++) {
-        store_amplitude(indices[i], results[i][0], results[i][1]);
+        thread_id += total_threads;
     }
 }

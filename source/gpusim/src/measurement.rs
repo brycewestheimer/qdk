@@ -18,6 +18,10 @@ use crate::precision::Precision;
 /// Larger state vectors are handled by the grid-stride loop.
 pub const MAX_MEASUREMENT_WORKGROUPS: u32 = 1024;
 
+/// Maximum number of workgroups for any single-dimension dispatch.
+/// Matches the WebGPU `maxComputeWorkgroupsPerDimension` minimum guarantee.
+const MAX_DISPATCH_WORKGROUPS: u32 = 65535;
+
 /// Orchestrates the GPU-CPU-GPU measurement round trip.
 ///
 /// Owns pre-allocated GPU buffers for the measurement pipeline:
@@ -72,21 +76,10 @@ impl MeasurementEngine {
     /// For a single-qubit measurement with `measure_mask = 1 << bit`, this
     /// returns `P(qubit = |1>)`.
     ///
-    /// # Data flow
-    ///
-    /// 1. Upload `MeasureParams` to a transient uniform buffer.
-    /// 2. Create a bind group: [read-only state, uniform params, rw `partial_sums`].
-    /// 3. Dispatch the measurement shader with `self.num_workgroups` workgroups.
-    /// 4. Copy `partial_sums_buffer` to `partial_sums_staging`.
-    /// 5. Map the staging buffer for CPU read.
-    /// 6. Read the f32 partial sums.
-    /// 7. Sum on CPU using Kahan compensated summation in f64.
-    /// 8. Unmap the staging buffer.
-    /// 9. Clamp result to [0.0, 1.0] and return.
-    ///
-    /// # Errors
-    ///
-    /// Returns `GpuSimError::BufferMapFailed` if the staging buffer mapping fails.
+    /// Dynamically scales the workgroup count based on state size:
+    /// `min(ceil(2^num_qubits / 256), self.num_workgroups)`. For small state
+    /// vectors (< 256 * `num_workgroups` amplitudes), this avoids launching
+    /// workgroups that would do no work.
     pub fn compute_probability(
         &self,
         device: &wgpu::Device,
@@ -109,6 +102,13 @@ impl MeasurementEngine {
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+
+        // Dynamic workgroup count: scale to state size, capped at pre-allocated max.
+        let num_amplitudes = 1u64 << num_qubits;
+        #[allow(clippy::cast_possible_truncation)]
+        let needed_workgroups = num_amplitudes
+            .div_ceil(256)
+            .min(u64::from(self.num_workgroups)) as u32;
 
         // Step 2: Create the measurement bind group.
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -141,11 +141,11 @@ impl MeasurementEngine {
             });
             pass.set_pipeline(cache.measurement_pipeline());
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(self.num_workgroups, 1, 1);
+            pass.dispatch_workgroups(needed_workgroups, 1, 1);
         }
         let floats_per_wg = u64::from(ActivePrecision::FLOATS_PER_PARTIAL_SUM);
         let copy_size =
-            u64::from(self.num_workgroups) * floats_per_wg * std::mem::size_of::<f32>() as u64;
+            u64::from(needed_workgroups) * floats_per_wg * std::mem::size_of::<f32>() as u64;
         encoder.copy_buffer_to_buffer(
             &self.partial_sums_buffer,
             0,
@@ -190,7 +190,7 @@ impl MeasurementEngine {
 
         #[cfg(feature = "f64_emulation")]
         {
-            // f64 mode: DS pairs (hi, lo) — 2 f32s per workgroup.
+            // f64 mode: DS pairs (hi, lo) -- 2 f32s per workgroup.
             for chunk in partial_sums.chunks_exact(2) {
                 let val = f64::from(chunk[0]) + f64::from(chunk[1]);
                 let y = val - compensation;
@@ -211,16 +211,8 @@ impl MeasurementEngine {
     /// Dispatches the collapse shader to project the state vector onto the
     /// subspace consistent with the measurement result.
     ///
-    /// # Arguments
-    ///
-    /// - `measure_mask`: Bitmask of measured qubits (same as used in `compute_probability`).
-    /// - `measured_value`: `true` if the measurement yielded |1> (or odd parity).
-    /// - `probability`: The probability of the measured outcome (NOT the other outcome).
-    /// - `num_qubits`: Total active qubits.
-    ///
-    /// # Panics
-    ///
-    /// Debug-panics if `probability` is zero or negative (caller must handle edge cases).
+    /// Uses a grid-stride loop in the shader, with workgroup count capped at
+    /// `MAX_DISPATCH_WORKGROUPS` (65535).
     #[allow(clippy::too_many_arguments)]
     pub fn collapse_state(
         &self,
@@ -235,6 +227,12 @@ impl MeasurementEngine {
     ) {
         debug_assert!(probability > 0.0, "collapse_state called with P=0");
 
+        let num_amplitudes = 1u64 << num_qubits;
+        #[allow(clippy::cast_possible_truncation)]
+        let workgroups = num_amplitudes
+            .div_ceil(256)
+            .min(u64::from(MAX_DISPATCH_WORKGROUPS)) as u32;
+
         // Collapse uses the GATE bind group layout (2 bindings: rw storage + uniform).
         #[cfg(not(feature = "f64_emulation"))]
         let uniform_buffer = {
@@ -245,6 +243,10 @@ impl MeasurementEngine {
                 measured_value: u32::from(measured_value),
                 normalization_factor,
                 num_qubits,
+                num_workgroups: workgroups,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
             };
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("collapse_params"),
@@ -261,7 +263,7 @@ impl MeasurementEngine {
                 measure_mask,
                 measured_value: u32::from(measured_value),
                 num_qubits,
-                _pad: 0,
+                num_workgroups: workgroups,
                 norm_hi,
                 norm_lo,
                 _pad2: 0,
@@ -288,11 +290,6 @@ impl MeasurementEngine {
                 },
             ],
         });
-
-        // One thread per amplitude. Workgroups = ceil(2^num_qubits / 256).
-        let num_amplitudes = 1u64 << num_qubits;
-        #[allow(clippy::cast_possible_truncation)]
-        let workgroups = num_amplitudes.div_ceil(256) as u32;
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("collapse_encoder"),

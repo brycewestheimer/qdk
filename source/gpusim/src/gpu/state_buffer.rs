@@ -37,8 +37,8 @@ impl StateBuffer {
     /// Use [`ensure_capacity`](Self::ensure_capacity) to grow before initializing
     /// a larger state vector.
     pub fn new(gpu: &GpuDevice) -> Result<Self, GpuSimError> {
-        let max_buffer_size = gpu.max_buffer_size();
-        let max_amplitudes = max_buffer_size / ActivePrecision::BYTES_PER_AMPLITUDE;
+        let max_state_bytes = gpu.max_state_bytes();
+        let max_amplitudes = max_state_bytes / ActivePrecision::BYTES_PER_AMPLITUDE;
 
         let initial_amplitudes = 1u64 << DEFAULT_INITIAL_QUBITS;
         let initial_size = initial_amplitudes * ActivePrecision::BYTES_PER_AMPLITUDE;
@@ -46,7 +46,9 @@ impl StateBuffer {
         let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("state_vector"),
             size: initial_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -80,7 +82,9 @@ impl StateBuffer {
         device: &wgpu::Device,
         num_qubits: u32,
     ) -> Result<bool, GpuSimError> {
-        let required_amplitudes = 1u64 << num_qubits;
+        // Guard against shift overflow: 1u64 << 64 panics in Rust.
+        // For num_qubits >= 64 this is always too large; checked_shl returns None.
+        let required_amplitudes = 1u64.checked_shl(num_qubits).unwrap_or(u64::MAX);
 
         if required_amplitudes > self.max_amplitudes {
             #[allow(clippy::cast_possible_truncation)]
@@ -109,7 +113,9 @@ impl StateBuffer {
         self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("state_vector"),
             size: new_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -134,7 +140,9 @@ impl StateBuffer {
     /// [`ensure_capacity`](Self::ensure_capacity) before calling this method.
     pub fn initialize(&mut self, queue: &wgpu::Queue, num_qubits: u32) {
         self.num_qubits = num_qubits;
-        self.num_amplitudes = 1u64 << num_qubits;
+        self.num_amplitudes = 1u64
+            .checked_shl(num_qubits)
+            .expect("num_qubits should be within validated range");
 
         // Build CPU-side state: |0...0> = [(1.0+0.0i), (0.0+0.0i), ...]
         // Use the active precision to encode the |0> amplitude correctly

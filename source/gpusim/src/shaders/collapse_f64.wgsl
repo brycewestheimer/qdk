@@ -12,7 +12,7 @@ struct CollapseParams {
     measure_mask: u32,
     measured_value: u32,
     num_qubits: u32,
-    _pad: u32,
+    num_workgroups: u32,
     // DS normalization factor: 1/sqrt(P(outcome)), stored as (hi, lo).
     norm_hi: f32,
     norm_lo: f32,
@@ -49,24 +49,25 @@ fn store_zero(idx: u32) {
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
     let num_amplitudes = 1u << params.num_qubits;
+    let total_threads = 256u * params.num_workgroups;
 
-    if (i >= num_amplitudes) {
-        return;
-    }
+    var i = gid.x;
+    while (i < num_amplitudes) {
+        // Parity check: same logic as f32 shader.
+        let parity = countOneBits(i & params.measure_mask) & 1u;
 
-    // Parity check: same logic as f32 shader.
-    let parity = countOneBits(i & params.measure_mask) & 1u;
+        if (parity == params.measured_value) {
+            // Renormalize using full DS multiplication.
+            let norm = DS(params.norm_hi, params.norm_lo);
+            let amp = load_amplitude(i);
+            let re_scaled = ds_mul(amp[0], norm);
+            let im_scaled = ds_mul(amp[1], norm);
+            store_amplitude(i, re_scaled, im_scaled);
+        } else {
+            store_zero(i);
+        }
 
-    if (parity == params.measured_value) {
-        // Renormalize using full DS multiplication.
-        let norm = DS(params.norm_hi, params.norm_lo);
-        let amp = load_amplitude(i);
-        let re_scaled = ds_mul(amp[0], norm);
-        let im_scaled = ds_mul(amp[1], norm);
-        store_amplitude(i, re_scaled, im_scaled);
-    } else {
-        store_zero(i);
+        i += total_threads;
     }
 }
