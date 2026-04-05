@@ -200,6 +200,23 @@ fn encode_4x4_ds(gate: &Mat4x4) -> [[f32; 4]; 16] {
     out
 }
 
+/// Encode a `Mat2x2F64` (4 complex entries as `(f64, f64)` tuples) into DS format
+/// packed as `[[f32; 4]; 4]` for vec4 uniform upload.
+///
+/// Unlike [`encode_2x2_ds`], this accepts f64 values directly, avoiding the
+/// precision loss from an f32 round-trip. Used for rotation gates and phase gates
+/// in the f64-emulation path.
+#[cfg(feature = "f64_emulation")]
+fn encode_2x2_ds_f64(gate: &crate::gates::Mat2x2F64) -> [[f32; 4]; 4] {
+    let mut out = [[0.0f32; 4]; 4];
+    for (i, &(re, im)) in gate.iter().enumerate() {
+        let (re_hi, re_lo) = precision::to_ds(re);
+        let (im_hi, im_lo) = precision::to_ds(im);
+        out[i] = [re_hi, re_lo, im_hi, im_lo];
+    }
+    out
+}
+
 /// Computes a capped workgroup count for GPU dispatch.
 ///
 /// Returns `min(required.div_ceil(256), MAX_WORKGROUPS)`.
@@ -418,7 +435,7 @@ pub fn dispatch_two_qubit_gate(
 /// (specified by `control_mask`) are in the |1> state.
 ///
 /// # Panics
-/// Debug-asserts that `target_bit` is not set in `control_mask`.
+/// Panics if `target_bit` is set in `control_mask`.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_multi_controlled_gate(
     device: &wgpu::Device,
@@ -430,7 +447,7 @@ pub fn dispatch_multi_controlled_gate(
     control_mask: u32,
     num_qubits: u32,
 ) {
-    debug_assert_eq!(
+    assert_eq!(
         control_mask & (1 << target_bit),
         0,
         "target_bit must not be set in control_mask"
@@ -505,6 +522,142 @@ pub fn dispatch_multi_controlled_gate(
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("multi_controlled_gate_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline_cache.multi_controlled_pipeline());
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(workgroup_count, 1, 1);
+    }
+    queue.submit(std::iter::once(encoder.finish()));
+}
+
+/// Dispatches a single-qubit gate with f64-precision matrix in DS format.
+///
+/// This is the f64-emulation counterpart of [`dispatch_single_qubit_gate`].
+/// It accepts a `Mat2x2F64` (f64 complex entries) and encodes them directly
+/// to DS format via [`encode_2x2_ds_f64`], bypassing f32 intermediates.
+#[cfg(feature = "f64_emulation")]
+pub fn dispatch_single_qubit_gate_f64(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline_cache: &PipelineCache,
+    state_buffer: &StateBuffer,
+    gate: &crate::gates::Mat2x2F64,
+    target_bit: u32,
+    num_qubits: u32,
+) {
+    let num_pairs = 1u64 << (num_qubits - 1);
+    let workgroup_count = capped_workgroup_count(num_pairs);
+
+    let params = GateParamsF64 {
+        target_bit,
+        num_qubits,
+        num_workgroups: workgroup_count,
+        _pad: 0,
+        matrix: encode_2x2_ds_f64(gate),
+    };
+    let param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gate_params"),
+        size: std::mem::size_of::<GateParamsF64>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&param_buffer, 0, bytemuck::bytes_of(&params));
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("gate_bind_group"),
+        layout: pipeline_cache.bind_group_layout(),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: state_buffer.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: param_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gate_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("single_qubit_gate_f64_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline_cache.single_qubit_pipeline());
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(workgroup_count, 1, 1);
+    }
+    queue.submit(std::iter::once(encoder.finish()));
+}
+
+/// Dispatches a multi-controlled gate with f64-precision matrix in DS format.
+///
+/// This is the f64-emulation counterpart of [`dispatch_multi_controlled_gate`].
+/// It accepts a `Mat2x2F64` and encodes directly to DS format.
+///
+/// # Panics
+/// Panics if `target_bit` is set in `control_mask`.
+#[cfg(feature = "f64_emulation")]
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_multi_controlled_gate_f64(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline_cache: &PipelineCache,
+    state_buffer: &StateBuffer,
+    gate: &crate::gates::Mat2x2F64,
+    target_bit: u32,
+    control_mask: u32,
+    num_qubits: u32,
+) {
+    assert_eq!(
+        control_mask & (1 << target_bit),
+        0,
+        "target_bit must not be set in control_mask"
+    );
+
+    let num_pairs = 1u64 << (num_qubits - 1);
+    let workgroup_count = capped_workgroup_count(num_pairs);
+
+    let params = MultiControlledGateParamsF64 {
+        target_bit,
+        num_qubits,
+        control_mask,
+        num_workgroups: workgroup_count,
+        matrix: encode_2x2_ds_f64(gate),
+    };
+    let param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("multi_controlled_params"),
+        size: std::mem::size_of::<MultiControlledGateParamsF64>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&param_buffer, 0, bytemuck::bytes_of(&params));
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("multi_controlled_bind_group"),
+        layout: pipeline_cache.bind_group_layout(),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: state_buffer.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: param_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("multi_controlled_gate_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("multi_controlled_gate_f64_pass"),
             timestamp_writes: None,
         });
         pass.set_pipeline(pipeline_cache.multi_controlled_pipeline());

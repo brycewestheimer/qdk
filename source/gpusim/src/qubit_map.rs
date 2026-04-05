@@ -128,10 +128,16 @@ impl QubitMap {
     /// Returns the highest bit position ever used, which determines the
     /// minimum state vector size as `2^(max_bit + 1)`.
     ///
-    /// Returns 0 if no qubits have ever been allocated.
+    /// Returns `None` if no qubits have ever been allocated. Returns
+    /// `Some(n)` where `n` is the highest bit position that was ever
+    /// assigned (even if that qubit has since been released).
     #[must_use]
-    pub fn max_bit(&self) -> usize {
-        self.next_bit.saturating_sub(1)
+    pub fn max_bit(&self) -> Option<usize> {
+        if self.next_bit == 0 {
+            None
+        } else {
+            Some(self.next_bit - 1)
+        }
     }
 }
 
@@ -159,7 +165,7 @@ mod tests {
         assert_eq!(map.bit_position(q1).expect("q1 should exist"), 1);
         assert_eq!(map.bit_position(q2).expect("q2 should exist"), 2);
         assert_eq!(map.active_count(), 3);
-        assert_eq!(map.max_bit(), 2);
+        assert_eq!(map.max_bit(), Some(2));
     }
 
     #[test]
@@ -262,7 +268,7 @@ mod tests {
         let q0 = map.allocate();
         let q1 = map.allocate();
         let q2 = map.allocate();
-        assert_eq!(map.max_bit(), 2);
+        assert_eq!(map.max_bit(), Some(2));
 
         // Release all qubits
         map.release(q0).expect("release should succeed");
@@ -270,7 +276,13 @@ mod tests {
         map.release(q2).expect("release should succeed");
 
         // max_bit should still be 2 (it never shrinks)
-        assert_eq!(map.max_bit(), 2);
+        assert_eq!(map.max_bit(), Some(2));
         assert_eq!(map.active_count(), 0);
+    }
+
+    #[test]
+    fn max_bit_none_when_empty() {
+        let map = QubitMap::new();
+        assert_eq!(map.max_bit(), None, "empty map should return None");
     }
 }

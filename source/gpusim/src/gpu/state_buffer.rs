@@ -8,6 +8,15 @@ use crate::precision::Precision;
 /// Default initial capacity: 4 qubits = 16 amplitudes = 128 bytes.
 const DEFAULT_INITIAL_QUBITS: u32 = 4;
 
+/// Standard usage flags for the primary state vector buffer.
+///
+/// `STORAGE`: bind as read-write storage in compute shaders.
+/// `COPY_SRC`: source for readback copies to staging buffer.
+/// `COPY_DST`: destination for state-preserving growth copies and `clear_buffer`.
+const STATE_BUFFER_USAGE: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE
+    .union(wgpu::BufferUsages::COPY_SRC)
+    .union(wgpu::BufferUsages::COPY_DST);
+
 /// GPU-resident state vector with staging buffer for CPU readback.
 ///
 /// Buffers start small and grow dynamically via [`ensure_capacity`](Self::ensure_capacity)
@@ -46,9 +55,7 @@ impl StateBuffer {
         let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("state_vector"),
             size: initial_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
+            usage: STATE_BUFFER_USAGE,
             mapped_at_creation: false,
         });
 
@@ -113,9 +120,7 @@ impl StateBuffer {
         self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("state_vector"),
             size: new_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
+            usage: STATE_BUFFER_USAGE,
             mapped_at_creation: false,
         });
 
@@ -129,6 +134,106 @@ impl StateBuffer {
         self.capacity_amplitudes = new_capacity;
 
         Ok(true)
+    }
+
+    /// Grows the state buffer to accommodate `new_num_qubits`, preserving
+    /// existing state data.
+    ///
+    /// The existing `2^old_num_qubits` amplitudes are GPU-copied into the new
+    /// buffer. The extension region (`2^old_num_qubits` through `2^new_num_qubits - 1`)
+    /// is zero-filled, representing new qubits initialized in |0>.
+    ///
+    /// This is the correct way to grow the state vector after gates have been
+    /// applied. Unlike [`initialize`], which overwrites the buffer with |0...0>,
+    /// this method preserves the quantum state and tensors in |0> for the new qubit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GpuSimError::TooManyQubits` if the requested size exceeds GPU limits.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `new_num_qubits <= self.num_qubits`.
+    pub fn grow_preserving_state(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        new_num_qubits: u32,
+    ) -> Result<(), GpuSimError> {
+        assert!(
+            new_num_qubits > self.num_qubits,
+            "grow_preserving_state requires new_num_qubits ({new_num_qubits}) > current ({})",
+            self.num_qubits,
+        );
+
+        let new_num_amplitudes = 1u64
+            .checked_shl(new_num_qubits)
+            .expect("new_num_qubits should be within validated range");
+        let old_num_amplitudes = self.num_amplitudes;
+        let old_active_size = old_num_amplitudes * ActivePrecision::BYTES_PER_AMPLITUDE;
+
+        if new_num_amplitudes > self.max_amplitudes {
+            #[allow(clippy::cast_possible_truncation)]
+            let max_qubits = if self.max_amplitudes == 0 {
+                0u32
+            } else {
+                63 - self.max_amplitudes.leading_zeros()
+            };
+            return Err(GpuSimError::TooManyQubits {
+                requested: new_num_qubits,
+                max: max_qubits,
+            });
+        }
+
+        if new_num_amplitudes > self.capacity_amplitudes {
+            // Need a bigger buffer. Compute new capacity with doubling strategy.
+            let mut new_capacity = self.capacity_amplitudes;
+            while new_capacity < new_num_amplitudes {
+                new_capacity = new_capacity.saturating_mul(2).min(self.max_amplitudes);
+            }
+            let new_size = new_capacity * ActivePrecision::BYTES_PER_AMPLITUDE;
+
+            let new_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("state_vector"),
+                size: new_size,
+                usage: STATE_BUFFER_USAGE,
+                mapped_at_creation: false,
+            });
+
+            // Clear new buffer to zeros, then copy old state data over the beginning.
+            // Commands in a single encoder execute in order: clear first, then copy.
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("grow_state_encoder"),
+            });
+            encoder.clear_buffer(&new_buffer, 0, None);
+            encoder.copy_buffer_to_buffer(&self.buffer, 0, &new_buffer, 0, old_active_size);
+            queue.submit(std::iter::once(encoder.finish()));
+
+            self.buffer = new_buffer;
+            self.capacity_amplitudes = new_capacity;
+
+            self.staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("state_vector_staging"),
+                size: new_size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        } else {
+            // Capacity sufficient. Clear only the extension region.
+            let new_active_size = new_num_amplitudes * ActivePrecision::BYTES_PER_AMPLITUDE;
+            let extension_size = new_active_size - old_active_size;
+
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("grow_state_clear_extension"),
+            });
+            encoder.clear_buffer(&self.buffer, old_active_size, Some(extension_size));
+            queue.submit(std::iter::once(encoder.finish()));
+        }
+
+        self.num_qubits = new_num_qubits;
+        self.num_amplitudes = new_num_amplitudes;
+
+        Ok(())
     }
 
     /// Writes the |0...0> state into the buffer for the given qubit count.

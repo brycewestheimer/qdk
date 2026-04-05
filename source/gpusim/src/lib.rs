@@ -24,6 +24,27 @@ use crate::measurement::MeasurementEngine;
 use crate::precision::Precision;
 use crate::qubit_map::QubitMap;
 
+/// Probability threshold for treating a measurement outcome as deterministic.
+///
+/// If `P(|1>)` is below this threshold, the outcome is treated as certainly |0>.
+/// If `P(|1>)` is above `1.0 - DETERMINISTIC_THRESHOLD`, the outcome is treated
+/// as certainly |1>. In either case, the collapse shader is still dispatched to
+/// ensure the state vector is properly projected and normalized.
+const DETERMINISTIC_THRESHOLD: f64 = 1e-10;
+
+/// Probability threshold for `qubit_is_zero()`.
+///
+/// A qubit is considered to be in |0> if `P(|1>)` is below this threshold.
+/// This is intentionally looser than [`DETERMINISTIC_THRESHOLD`] because
+/// `qubit_is_zero` is a non-destructive query that does not collapse state.
+const QUBIT_ZERO_THRESHOLD: f64 = 1e-6;
+
+/// Amplitude threshold for `get_state()` filtering.
+///
+/// Amplitudes with `|amplitude|^2 <= AMPLITUDE_FILTER_THRESHOLD` are excluded
+/// from the sparse state representation returned by `get_state()`.
+const AMPLITUDE_FILTER_THRESHOLD: f64 = 1e-10;
+
 #[cfg(not(feature = "f64_emulation"))]
 type ActivePrecision = precision::F32Precision;
 #[cfg(feature = "f64_emulation")]
@@ -83,23 +104,37 @@ impl GpuQuantumSim {
     /// Allocates a new qubit in the |0> state and returns its ID.
     ///
     /// The first call initializes the state vector to |0>. Subsequent calls
-    /// grow the state vector by one qubit (in the |0> state) by re-initializing
-    /// the buffer if the qubit count has increased.
-    ///
-    /// **Phase 1 limitation**: Allocating a qubit after gates have been applied
-    /// will re-initialize the state vector, discarding previous gate operations.
-    /// Allocate all qubits before applying any gates.
+    /// grow the state vector by one qubit (in the |0> state), preserving
+    /// existing quantum state via GPU buffer copy.
     pub fn allocate(&mut self) -> usize {
         let id = self.qubit_map.allocate();
-        #[allow(clippy::cast_possible_truncation)]
-        let required_qubits = (self.qubit_map.max_bit() + 1) as u32;
-        if required_qubits > self.state.num_qubits() {
-            self.state
-                .ensure_capacity(self.gpu.device(), required_qubits)
-                .expect("GPU should have capacity for requested qubits");
-            self.state.initialize(self.gpu.queue(), required_qubits);
+
+        match self.qubit_map.max_bit() {
+            None => {
+                // This shouldn't happen -- we just allocated, so max_bit >= Some(0).
+                // But handle defensively.
+                id
+            }
+            Some(max_bit) => {
+                #[allow(clippy::cast_possible_truncation)]
+                let required_qubits = (max_bit + 1) as u32;
+                if self.state.num_qubits() == 0 {
+                    // First allocation: initialize to |0...0>.
+                    self.state
+                        .ensure_capacity(self.gpu.device(), required_qubits)
+                        .expect("GPU should have capacity for requested qubits");
+                    self.state.initialize(self.gpu.queue(), required_qubits);
+                } else if required_qubits > self.state.num_qubits() {
+                    // Growth: preserve existing state, tensor in |0> for new qubit.
+                    self.state
+                        .grow_preserving_state(self.gpu.device(), self.gpu.queue(), required_qubits)
+                        .expect("GPU should have capacity for requested qubits");
+                }
+                // If required_qubits <= num_qubits, a recycled bit position is being
+                // reused and no buffer growth is needed.
+                id
+            }
         }
-        id
     }
 
     // ========================================================================
@@ -161,17 +196,62 @@ impl GpuQuantumSim {
 
     /// Applies the Rx rotation gate to the target qubit.
     pub fn rx(&mut self, theta: f64, target: usize) {
+        #[cfg(not(feature = "f64_emulation"))]
         self.dispatch_single_qubit(target, &crate::gates::rx(theta));
+
+        #[cfg(feature = "f64_emulation")]
+        {
+            let bit = self.resolve_bit(target);
+            dispatch::dispatch_single_qubit_gate_f64(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                &crate::gates::rx_f64(theta),
+                bit,
+                self.state.num_qubits(),
+            );
+        }
     }
 
     /// Applies the Ry rotation gate to the target qubit.
     pub fn ry(&mut self, theta: f64, target: usize) {
+        #[cfg(not(feature = "f64_emulation"))]
         self.dispatch_single_qubit(target, &crate::gates::ry(theta));
+
+        #[cfg(feature = "f64_emulation")]
+        {
+            let bit = self.resolve_bit(target);
+            dispatch::dispatch_single_qubit_gate_f64(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                &crate::gates::ry_f64(theta),
+                bit,
+                self.state.num_qubits(),
+            );
+        }
     }
 
     /// Applies the Rz rotation gate to the target qubit.
     pub fn rz(&mut self, theta: f64, target: usize) {
+        #[cfg(not(feature = "f64_emulation"))]
         self.dispatch_single_qubit(target, &crate::gates::rz(theta));
+
+        #[cfg(feature = "f64_emulation")]
+        {
+            let bit = self.resolve_bit(target);
+            dispatch::dispatch_single_qubit_gate_f64(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                &crate::gates::rz_f64(theta),
+                bit,
+                self.state.num_qubits(),
+            );
+        }
     }
 
     // ========================================================================
@@ -224,17 +304,29 @@ impl GpuQuantumSim {
 
     /// Multi-controlled Rz gate.
     pub fn mcrz(&mut self, ctls: &[usize], theta: f64, target: usize) {
+        #[cfg(not(feature = "f64_emulation"))]
         self.dispatch_mc_gate(ctls, target, &crate::gates::rz(theta));
+
+        #[cfg(feature = "f64_emulation")]
+        self.dispatch_mc_gate_f64(ctls, target, &crate::gates::rz_f64(theta));
     }
 
-    /// Multi-controlled phase gate: diag(1, phase) with controls.
+    /// Multi-controlled phase gate: `diag(1, phase)` with controls.
     ///
-    /// `phase` is a complex number. The gate applies diag(1, phase) to the
+    /// `phase` is a complex number. The gate applies `diag(1, phase)` to the
     /// target qubit when all control qubits are |1>.
     pub fn mcphase(&mut self, ctls: &[usize], phase: Complex64, target: usize) {
-        #[allow(clippy::cast_possible_truncation)]
-        let mat = crate::gates::phase_gate(phase.re as f32, phase.im as f32);
-        self.dispatch_mc_gate(ctls, target, &mat);
+        #[cfg(not(feature = "f64_emulation"))]
+        {
+            let mat = crate::gates::phase_gate(phase.re, phase.im);
+            self.dispatch_mc_gate(ctls, target, &mat);
+        }
+
+        #[cfg(feature = "f64_emulation")]
+        {
+            let mat = crate::gates::phase_gate_f64(phase.re, phase.im);
+            self.dispatch_mc_gate_f64(ctls, target, &mat);
+        }
     }
 
     // ========================================================================
@@ -287,17 +379,18 @@ impl GpuQuantumSim {
     /// Measures a single qubit in the computational basis.
     ///
     /// Returns `true` if the qubit collapsed to |1>, `false` if |0>.
-    /// The state vector is projected and renormalized in-place on the GPU.
+    /// The state vector is always projected and renormalized in-place on the GPU,
+    /// including for deterministic outcomes.
     ///
     /// # Measurement pipeline
     ///
     /// 1. Look up the qubit's internal bit position from the qubit map.
-    /// 2. Dispatch the measurement shader to compute P(qubit = |1>).
-    /// 3. Handle deterministic edge cases:
-    ///    - P < 1e-10: return false (certainly |0>), skip collapse.
-    ///    - P > 1 - 1e-10: return true (certainly |1>), skip collapse.
-    /// 4. Sample the RNG: result = (random < P).
-    /// 5. Dispatch the collapse shader with the appropriate normalization.
+    /// 2. Dispatch the measurement shader to compute `P(qubit = |1>)`.
+    /// 3. Determine the outcome:
+    ///    - `P < DETERMINISTIC_THRESHOLD`: outcome is |0> (deterministic).
+    ///    - `P > 1 - DETERMINISTIC_THRESHOLD`: outcome is |1> (deterministic).
+    ///    - Otherwise: sample from Born rule distribution using the RNG.
+    /// 4. Dispatch the collapse shader to project and renormalize the state.
     pub fn measure(&mut self, id: usize) -> bool {
         let bit = self
             .qubit_map
@@ -319,19 +412,19 @@ impl GpuQuantumSim {
             )
             .expect("probability computation should succeed");
 
-        // Deterministic cases: skip collapse dispatch entirely.
-        if p1 < 1e-10 {
-            return false;
-        }
-        if p1 > 1.0 - 1e-10 {
-            return true;
-        }
+        // Determine outcome. For deterministic cases, we still dispatch collapse
+        // to ensure the state vector is properly projected and normalized.
+        let result = if p1 < DETERMINISTIC_THRESHOLD {
+            false
+        } else if p1 > 1.0 - DETERMINISTIC_THRESHOLD {
+            true
+        } else {
+            // Probabilistic case: sample from Born rule distribution.
+            let random: f64 = f64::from(self.rng.r#gen::<f32>());
+            random < p1
+        };
 
-        // Probabilistic case: sample from Born rule distribution.
-        let random: f64 = f64::from(self.rng.r#gen::<f32>());
-        let result = random < p1;
-
-        // Collapse: zero inconsistent amplitudes, renormalize consistent ones.
+        // Always collapse: zero inconsistent amplitudes, renormalize consistent ones.
         let probability = if result { p1 } else { 1.0 - p1 };
         self.measurement_engine.collapse_state(
             self.gpu.device(),
@@ -350,7 +443,8 @@ impl GpuQuantumSim {
     /// Performs a joint parity measurement on multiple qubits.
     ///
     /// Returns `true` if the measured parity is odd, `false` if even.
-    /// The measurement collapses the state to the subspace with matching parity.
+    /// The state vector is always collapsed to the subspace with matching parity,
+    /// including for deterministic outcomes.
     ///
     /// For a single qubit, this is equivalent to `measure()`.
     ///
@@ -373,15 +467,14 @@ impl GpuQuantumSim {
             )
             .expect("probability computation should succeed");
 
-        if p_odd < 1e-10 {
-            return false;
-        }
-        if p_odd > 1.0 - 1e-10 {
-            return true;
-        }
-
-        let random: f64 = f64::from(self.rng.r#gen::<f32>());
-        let result = random < p_odd;
+        let result = if p_odd < DETERMINISTIC_THRESHOLD {
+            false
+        } else if p_odd > 1.0 - DETERMINISTIC_THRESHOLD {
+            true
+        } else {
+            let random: f64 = f64::from(self.rng.r#gen::<f32>());
+            random < p_odd
+        };
 
         let probability = if result { p_odd } else { 1.0 - p_odd };
         self.measurement_engine.collapse_state(
@@ -421,8 +514,8 @@ impl GpuQuantumSim {
 
     /// Returns `true` if the qubit is in the |0> state (within tolerance).
     ///
-    /// Computes P(qubit = |1>) and checks if it is below 1e-6.
-    /// Does NOT collapse the state.
+    /// Computes `P(qubit = |1>)` and checks if it is below
+    /// [`QUBIT_ZERO_THRESHOLD`]. Does NOT collapse the state.
     pub fn qubit_is_zero(&mut self, id: usize) -> bool {
         let bit = self
             .qubit_map
@@ -444,7 +537,7 @@ impl GpuQuantumSim {
             )
             .expect("probability computation should succeed");
 
-        p1 < 1e-6
+        p1 < QUBIT_ZERO_THRESHOLD
     }
 
     // ========================================================================
@@ -453,18 +546,18 @@ impl GpuQuantumSim {
 
     /// Releases a qubit, returning its ID and bit position to the recycling pool.
     ///
-    /// If the qubit is not in |0>, it is measured and collapsed to |0> first
-    /// (matching `QuantumSim::release()` semantics). This ensures the bit
-    /// position can be safely reused by a future allocation.
+    /// The qubit is always measured and, if in |1>, flipped to |0> before release.
+    /// This ensures the bit position is in a clean state for reuse.
     ///
     /// Release does NOT shrink the state vector. The dense simulator's state
     /// vector only grows; released bit positions become semantically inactive.
     pub fn release(&mut self, id: usize) {
-        if !self.qubit_is_zero(id) {
-            // Measure to collapse, then flip to |0> if needed.
-            if self.measure(id) {
-                self.x(id);
-            }
+        // Always measure and reset. This is simpler and more correct than the
+        // previous approach of checking qubit_is_zero() first, because:
+        // 1. It avoids a semantic inconsistency where |0> qubits skip collapse.
+        // 2. The cost of one extra GPU dispatch is negligible for correctness.
+        if self.measure(id) {
+            self.x(id);
         }
         self.qubit_map
             .release(id)
@@ -500,7 +593,7 @@ impl GpuQuantumSim {
     /// positions to qubit IDs is computed from [`QubitMap::active_mappings`].
     pub fn get_state(&self) -> Result<(Vec<(BigUint, Complex64)>, usize), GpuSimError> {
         let raw_floats = self.state.readback(self.gpu.device(), self.gpu.queue())?;
-        let threshold = 1e-10_f64;
+        let threshold = AMPLITUDE_FILTER_THRESHOLD;
         let floats_per_amp = ActivePrecision::FLOATS_PER_AMPLITUDE as usize;
 
         // Get the mapping: Vec<(bit_position, qubit_id)> for all active qubits.
@@ -647,12 +740,56 @@ impl GpuQuantumSim {
             );
         } else {
             let control_mask = self.build_control_mask(ctls);
-            debug_assert_eq!(
+            assert_eq!(
                 control_mask & (1 << target_bit),
                 0,
                 "target qubit must not also be a control"
             );
             dispatch::dispatch_multi_controlled_gate(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                matrix,
+                target_bit,
+                control_mask,
+                n,
+            );
+        }
+    }
+
+    /// Dispatch routing for multi-controlled gates with f64 precision matrices.
+    ///
+    /// Used by rotation and phase gates in the f64-emulation path to avoid
+    /// f32 intermediate truncation.
+    #[cfg(feature = "f64_emulation")]
+    fn dispatch_mc_gate_f64(
+        &mut self,
+        ctls: &[usize],
+        target: usize,
+        matrix: &crate::gates::Mat2x2F64,
+    ) {
+        let target_bit = self.resolve_bit(target);
+        let n = self.state.num_qubits();
+
+        if ctls.is_empty() {
+            dispatch::dispatch_single_qubit_gate_f64(
+                self.gpu.device(),
+                self.gpu.queue(),
+                &self.pipelines,
+                &self.state,
+                matrix,
+                target_bit,
+                n,
+            );
+        } else {
+            let control_mask = self.build_control_mask(ctls);
+            assert_eq!(
+                control_mask & (1 << target_bit),
+                0,
+                "target qubit must not also be a control"
+            );
+            dispatch::dispatch_multi_controlled_gate_f64(
                 self.gpu.device(),
                 self.gpu.queue(),
                 &self.pipelines,

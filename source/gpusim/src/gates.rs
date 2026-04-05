@@ -112,15 +112,21 @@ pub const SXADJ: Mat2x2 = [(0.5, -0.5), (0.5, 0.5), (0.5, 0.5), (0.5, -0.5)];
 ///          [-i*sin(t/2),  cos(t/2)   ]]
 /// ```
 ///
-/// Matches the convention in `cpu_full_state_simulator.rs` (line 130).
-/// Accepts `f64` at the API boundary and casts to `f32` internally.
+/// Trig is computed in f64 for precision, then truncated to f32 for the
+/// matrix elements. For the f64-emulation path, use [`rx_f64`] instead.
 #[must_use]
 pub fn rx(theta: f64) -> Mat2x2 {
-    #[allow(clippy::cast_possible_truncation)]
-    let half = (theta / 2.0) as f32;
+    let half = theta / 2.0;
     let cos = half.cos();
     let sin = half.sin();
-    [(cos, 0.0), (0.0, -sin), (0.0, -sin), (cos, 0.0)]
+    #[allow(clippy::cast_possible_truncation)]
+    let (cos_f32, sin_f32) = (cos as f32, sin as f32);
+    [
+        (cos_f32, 0.0),
+        (0.0, -sin_f32),
+        (0.0, -sin_f32),
+        (cos_f32, 0.0),
+    ]
 }
 
 /// Ry(theta) rotation gate.
@@ -130,14 +136,21 @@ pub fn rx(theta: f64) -> Mat2x2 {
 ///          [sin(t/2),  cos(t/2) ]]
 /// ```
 ///
-/// Matches the convention in `cpu_full_state_simulator.rs` (line 139).
+/// Trig is computed in f64 for precision, then truncated to f32.
+/// For the f64-emulation path, use [`ry_f64`] instead.
 #[must_use]
 pub fn ry(theta: f64) -> Mat2x2 {
-    #[allow(clippy::cast_possible_truncation)]
-    let half = (theta / 2.0) as f32;
+    let half = theta / 2.0;
     let cos = half.cos();
     let sin = half.sin();
-    [(cos, 0.0), (-sin, 0.0), (sin, 0.0), (cos, 0.0)]
+    #[allow(clippy::cast_possible_truncation)]
+    let (cos_f32, sin_f32) = (cos as f32, sin as f32);
+    [
+        (cos_f32, 0.0),
+        (-sin_f32, 0.0),
+        (sin_f32, 0.0),
+        (cos_f32, 0.0),
+    ]
 }
 
 /// Rz(theta) rotation gate.
@@ -147,25 +160,79 @@ pub fn ry(theta: f64) -> Mat2x2 {
 ///       = diag(cos(t/2) - i*sin(t/2), cos(t/2) + i*sin(t/2))
 /// ```
 ///
-/// Matches the convention in `cpu_full_state_simulator.rs` (line 147):
-/// ```text
-/// let a = (-i * angle / 2.0).exp();  // e^(-i*t/2)
-/// let b = (i * angle / 2.0).exp();   // e^(i*t/2)
-/// // Rz = diag(a, b)
-/// ```
+/// Trig is computed in f64 for precision, then truncated to f32.
+/// For the f64-emulation path, use [`rz_f64`] instead.
 #[must_use]
 pub fn rz(theta: f64) -> Mat2x2 {
+    let half = theta / 2.0;
+    let cos = half.cos();
+    let sin = half.sin();
     #[allow(clippy::cast_possible_truncation)]
-    let half = (theta / 2.0) as f32;
+    let (cos_f32, sin_f32) = (cos as f32, sin as f32);
+    [
+        (cos_f32, -sin_f32),
+        (0.0, 0.0),
+        (0.0, 0.0),
+        (cos_f32, sin_f32),
+    ]
+}
+
+/// Constructs a phase gate: `diag(1, phase)` where `phase` is given as
+/// `(re, im)` components. Accepts f64 and truncates to f32.
+///
+/// For the f64-emulation path, use [`phase_gate_f64`] instead.
+#[must_use]
+pub fn phase_gate(phase_re: f64, phase_im: f64) -> Mat2x2 {
+    #[allow(clippy::cast_possible_truncation)]
+    let (re, im) = (phase_re as f32, phase_im as f32);
+    [(1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (re, im)]
+}
+
+/// Complex number as (real, imaginary) f64 pair, for f64-emulation path.
+#[cfg(feature = "f64_emulation")]
+pub type C64Pair = (f64, f64);
+
+/// 2x2 unitary matrix with f64 elements, for f64-emulation DS encoding.
+#[cfg(feature = "f64_emulation")]
+pub type Mat2x2F64 = [C64Pair; 4];
+
+/// Rx(theta) rotation gate with f64 precision matrix elements.
+///
+/// Returns the matrix with full f64 trig values for direct DS encoding.
+/// Used only in the f64-emulation path.
+#[cfg(feature = "f64_emulation")]
+#[must_use]
+pub fn rx_f64(theta: f64) -> Mat2x2F64 {
+    let half = theta / 2.0;
+    let cos = half.cos();
+    let sin = half.sin();
+    [(cos, 0.0), (0.0, -sin), (0.0, -sin), (cos, 0.0)]
+}
+
+/// Ry(theta) rotation gate with f64 precision matrix elements.
+#[cfg(feature = "f64_emulation")]
+#[must_use]
+pub fn ry_f64(theta: f64) -> Mat2x2F64 {
+    let half = theta / 2.0;
+    let cos = half.cos();
+    let sin = half.sin();
+    [(cos, 0.0), (-sin, 0.0), (sin, 0.0), (cos, 0.0)]
+}
+
+/// Rz(theta) rotation gate with f64 precision matrix elements.
+#[cfg(feature = "f64_emulation")]
+#[must_use]
+pub fn rz_f64(theta: f64) -> Mat2x2F64 {
+    let half = theta / 2.0;
     let cos = half.cos();
     let sin = half.sin();
     [(cos, -sin), (0.0, 0.0), (0.0, 0.0), (cos, sin)]
 }
 
-/// Constructs a phase gate: diag(1, e^(i*phi)) where phi is given as (re, im)
-/// components of e^(i*phi).
+/// Phase gate with f64 precision: `diag(1, phase_re + i*phase_im)`.
+#[cfg(feature = "f64_emulation")]
 #[must_use]
-pub fn phase_gate(phase_re: f32, phase_im: f32) -> Mat2x2 {
+pub fn phase_gate_f64(phase_re: f64, phase_im: f64) -> Mat2x2F64 {
     [(1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (phase_re, phase_im)]
 }
 
@@ -473,5 +540,23 @@ mod tests {
                 S[i].1
             );
         }
+    }
+
+    #[cfg(feature = "f64_emulation")]
+    #[test]
+    fn rx_f64_at_small_angle() {
+        // At very small angles, f64 trig is significantly more precise than f32 trig.
+        let theta = 1e-8_f64;
+        let m = rx_f64(theta);
+        let expected_cos = (theta / 2.0).cos();
+        let expected_sin = (theta / 2.0).sin();
+        assert!(
+            (m[0].0 - expected_cos).abs() < 1e-15,
+            "f64 rx cos precision"
+        );
+        assert!(
+            (m[1].1 - (-expected_sin)).abs() < 1e-15,
+            "f64 rx sin precision"
+        );
     }
 }
