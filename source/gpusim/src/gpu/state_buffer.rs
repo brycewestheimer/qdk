@@ -239,42 +239,30 @@ impl StateBuffer {
     /// Writes the |0...0> state into the buffer for the given qubit count.
     ///
     /// The first amplitude is set to (1.0, 0.0) and all others to (0.0, 0.0).
-    /// Uses `mapped_at_creation` to write the first amplitude directly into a
-    /// zero-initialized buffer, avoiding a large CPU-side allocation.
+    /// Writes into the existing buffer via `queue.write_buffer`, preserving the
+    /// capacity invariant established by [`ensure_capacity`](Self::ensure_capacity).
     ///
     /// The caller must ensure the buffer has sufficient capacity via
-    /// [`ensure_capacity`](Self::ensure_capacity) before calling this method.
-    pub fn initialize(&mut self, device: &wgpu::Device, num_qubits: u32) {
+    /// `ensure_capacity` before calling this method.
+    pub fn initialize(&mut self, queue: &wgpu::Queue, num_qubits: u32) {
         self.num_qubits = num_qubits;
         self.num_amplitudes = 1u64
             .checked_shl(num_qubits)
             .expect("num_qubits should be within validated range");
 
-        // Create a new buffer with mapped_at_creation = true.
-        // The GPU driver provides a zero-initialized mapping. We only need
-        // to write the first amplitude (1.0 + 0.0i).
+        // Build a zero-initialized byte vector with the first amplitude set to
+        // 1.0 + 0.0i. This is only called on the very first allocation (typically
+        // 1 qubit = 16 or 32 bytes), so the CPU-side Vec is negligible.
         let active_size = self.num_amplitudes * ActivePrecision::BYTES_PER_AMPLITUDE;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("state_vector"),
-            size: active_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: true,
-        });
-
-        // Write just the first amplitude into the mapped memory.
-        {
-            let mut mapping = buffer.slice(..active_size).get_mapped_range_mut();
-            let one_encoded = ActivePrecision::encode_complex(Complex64::new(1.0, 0.0));
-            for (i, &val) in one_encoded.iter().enumerate() {
-                let start = i * 4;
-                mapping[start..start + 4].copy_from_slice(&val.to_le_bytes());
-            }
+        // First allocation is tiny (~16-32 bytes); truncation to usize is safe.
+        #[allow(clippy::cast_possible_truncation)]
+        let mut data = vec![0u8; active_size as usize];
+        let one_encoded = ActivePrecision::encode_complex(Complex64::new(1.0, 0.0));
+        for (i, &val) in one_encoded.iter().enumerate() {
+            let start = i * 4;
+            data[start..start + 4].copy_from_slice(&val.to_le_bytes());
         }
-        buffer.unmap();
-
-        self.buffer = buffer;
+        queue.write_buffer(&self.buffer, 0, &data);
     }
 
     /// Copies the state vector from GPU to CPU and returns the raw f32 data.

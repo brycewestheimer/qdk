@@ -530,7 +530,7 @@ impl PyGpuQuantumSim {
     ///     RuntimeError: If any qubit ID is invalid.
     // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
-    fn joint_probability(&mut self, ids: Vec<usize>) -> PyResult<f64> {
+    fn joint_probability(&self, ids: Vec<usize>) -> PyResult<f64> {
         self.inner.joint_probability(&ids).map_err(to_py_err)
     }
 
@@ -544,7 +544,7 @@ impl PyGpuQuantumSim {
     ///
     /// Raises:
     ///     RuntimeError: If the qubit ID is invalid.
-    fn qubit_is_zero(&mut self, id: usize) -> PyResult<bool> {
+    fn qubit_is_zero(&self, id: usize) -> PyResult<bool> {
         self.inner.qubit_is_zero(id).map_err(to_py_err)
     }
 

@@ -2,13 +2,6 @@ use wgpu::{Adapter, Device, DeviceType, Queue};
 
 use crate::error::GpuSimError;
 
-/// Maximum number of qubits due to WGSL u32 indexing constraints.
-///
-/// Shaders index the state vector as `idx * 2u` (f32 mode) or `idx * 4u`
-/// (f64 mode). The amplitude index itself is `1u << num_qubits`, which must
-/// fit in a u32. Since `1u << 32` overflows u32, the hard cap is 31 qubits.
-const MAX_QUBITS_U32_LIMIT: u32 = 31;
-
 /// Holds the wgpu device, queue, and capability metadata.
 pub struct GpuDevice {
     device: Device,
@@ -89,7 +82,9 @@ impl GpuDevice {
     ///
     /// Scoring priorities:
     /// 1. Discrete GPU (8) > Integrated GPU (4) > Other (0, filtered out)
-    /// 2. Vulkan/Metal (2) > DX12 (1) > Other (0, filtered out)
+    /// 2. Native backends (2) > Translation-layer backends (1) > Other (0)
+    ///    - Windows: Vulkan, Metal, DX12 all score 2 (DX12 is native)
+    ///    - Other platforms: Vulkan/Metal score 2, DX12 scores 1
     /// 3. Higher `max_compute_workgroup_storage_size` breaks ties
     /// 4. Higher `max_storage_buffer_binding_size` breaks further ties
     ///
@@ -200,7 +195,9 @@ impl GpuDevice {
     /// For f64-emulated, `bytes_per_amplitude` is 16 (four f32 values).
     ///
     /// Returns `n` such that `2^n * bytes_per_amplitude <= max_state_bytes`.
-    /// Also caps at 31 qubits due to WGSL u32 indexing constraints.
+    /// Also caps based on WGSL u32 indexing: shaders index as
+    /// `state[idx * floats_per_amplitude]`, so `(2^n - 1) * floats` must fit
+    /// in u32. This gives 31 for f32 (2 floats) and 30 for f64 (4 floats).
     #[must_use]
     pub fn max_qubits(&self, bytes_per_amplitude: u64) -> u32 {
         let max_state = self.max_state_bytes();
@@ -210,6 +207,12 @@ impl GpuDevice {
         }
         // 63 - leading_zeros gives floor(log2(n)) for n > 0
         let from_memory = 63 - max_amplitudes.leading_zeros();
-        from_memory.min(MAX_QUBITS_U32_LIMIT)
+
+        // WGSL shaders index as state[idx * floats_per_amplitude] using u32.
+        // The maximum array index must fit in u32, giving n <= 32 - log2(floats).
+        #[allow(clippy::cast_possible_truncation)]
+        let floats_per_amplitude = (bytes_per_amplitude / 4) as u32;
+        let u32_index_limit = 32 - floats_per_amplitude.ilog2();
+        from_memory.min(u32_index_limit)
     }
 }

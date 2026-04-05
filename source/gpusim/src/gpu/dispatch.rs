@@ -7,8 +7,9 @@ use crate::precision;
 /// Maximum number of workgroups that can be dispatched in a single dimension.
 ///
 /// Per the WebGPU spec, `maxComputeWorkgroupsPerDimension` is at least 65535.
-/// Gate shaders use grid-stride loops to handle work beyond this limit.
-const MAX_WORKGROUPS: u32 = 65535;
+/// Gate and measurement shaders use grid-stride loops to handle work beyond
+/// this limit.
+pub(crate) const MAX_DISPATCH_WORKGROUPS: u32 = 65535;
 
 /// GPU-side gate parameters matching the WGSL `GateParams` struct layout.
 ///
@@ -225,7 +226,9 @@ fn encode_2x2_ds_f64(gate: &crate::gates::Mat2x2F64) -> [[f32; 4]; 4] {
 fn capped_workgroup_count(num_items: u64) -> u32 {
     // Workgroup count is bounded by GPU dispatch limits (~65535); truncation to u32 is safe.
     #[allow(clippy::cast_possible_truncation)]
-    let needed = num_items.div_ceil(256).min(u64::from(MAX_WORKGROUPS)) as u32;
+    let needed = num_items
+        .div_ceil(256)
+        .min(u64::from(MAX_DISPATCH_WORKGROUPS)) as u32;
     needed
 }
 

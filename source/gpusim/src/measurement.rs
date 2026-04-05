@@ -6,7 +6,7 @@ use crate::error::GpuSimError;
 use crate::gpu::dispatch::CollapseParams;
 #[cfg(feature = "f64_emulation")]
 use crate::gpu::dispatch::CollapseParamsF64;
-use crate::gpu::dispatch::MeasureParams;
+use crate::gpu::dispatch::{MAX_DISPATCH_WORKGROUPS, MeasureParams};
 use crate::gpu::pipeline::PipelineCache;
 use crate::gpu::state_buffer::StateBuffer;
 use crate::precision::Precision;
@@ -17,10 +17,6 @@ use crate::precision::Precision;
 /// process 256 * 1024 = 262,144 amplitudes per grid-stride iteration.
 /// Larger state vectors are handled by the grid-stride loop.
 pub const MAX_MEASUREMENT_WORKGROUPS: u32 = 1024;
-
-/// Maximum number of workgroups for any single-dimension dispatch.
-/// Matches the WebGPU `maxComputeWorkgroupsPerDimension` minimum guarantee.
-const MAX_DISPATCH_WORKGROUPS: u32 = 65535;
 
 /// Orchestrates the GPU-CPU-GPU measurement round trip.
 ///

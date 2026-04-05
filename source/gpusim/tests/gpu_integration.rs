@@ -39,10 +39,13 @@ fn gpu_device_creation() {
     eprintln!("Max qubits (f32): {}", sim.max_qubits());
 
     // M-16: Assert adapter is a real GPU, not a software/CPU fallback.
-    let device_type_str = format!("{:?}", info.device_type);
     assert!(
-        device_type_str == "DiscreteGpu" || device_type_str == "IntegratedGpu",
-        "expected a discrete or integrated GPU, got {device_type_str}",
+        matches!(
+            info.device_type,
+            wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+        ),
+        "expected a discrete or integrated GPU, got {:?}",
+        info.device_type,
     );
 }
 

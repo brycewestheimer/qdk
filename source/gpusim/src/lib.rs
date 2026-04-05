@@ -146,22 +146,35 @@ impl GpuQuantumSim {
                 // Bit positions are bounded by GPU memory (~30 max); truncation to u32 is safe.
                 #[allow(clippy::cast_possible_truncation)]
                 let required_qubits = (max_bit + 1) as u32;
-                if self.state.num_qubits() == 0 {
+                let gpu_result = if self.state.num_qubits() == 0 {
                     // First allocation: initialize to |0...0>.
                     self.state
-                        .ensure_capacity(self.gpu.device(), required_qubits)?;
-                    self.state.initialize(self.gpu.device(), required_qubits);
+                        .ensure_capacity(self.gpu.device(), required_qubits)
+                        .map(|_| {
+                            self.state.initialize(self.gpu.queue(), required_qubits);
+                        })
                 } else if required_qubits > self.state.num_qubits() {
                     // Growth: preserve existing state, tensor in |0> for new qubit.
                     self.state.grow_preserving_state(
                         self.gpu.device(),
                         self.gpu.queue(),
                         required_qubits,
-                    )?;
+                    )
+                } else {
+                    // Recycled bit position -- no buffer growth needed.
+                    Ok(())
+                };
+                match gpu_result {
+                    Ok(()) => Ok(id),
+                    Err(e) => {
+                        // Roll back the qubit map entry so the simulator stays
+                        // consistent after a GPU capacity error.
+                        self.qubit_map
+                            .release(id)
+                            .expect("rollback of just-allocated qubit");
+                        Err(e)
+                    }
                 }
-                // If required_qubits <= num_qubits, a recycled bit position is being
-                // reused and no buffer growth is needed.
-                Ok(id)
             }
         }
     }
@@ -726,7 +739,9 @@ impl GpuQuantumSim {
     /// Primarily used in benchmarks to measure actual GPU execution time
     /// rather than just command submission latency.
     pub fn sync_gpu(&self) {
-        let _ = self.gpu.device().poll(wgpu::PollType::wait_indefinitely());
+        if let Err(e) = self.gpu.device().poll(wgpu::PollType::wait_indefinitely()) {
+            log::warn!("GPU poll failed: {e}");
+        }
     }
 
     // ========================================================================
