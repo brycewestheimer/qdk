@@ -10,9 +10,9 @@
 mod report {
     #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 
-    use num_bigint::BigUint;
     use num_complex::Complex64;
     use qdk_gpu_sim::GpuQuantumSim;
+    use qdk_gpu_sim::precision_utils::{compute_metrics, to_dense};
     use quantum_sparse_sim::QuantumSim;
     use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -91,51 +91,6 @@ mod report {
         }
         let (state, _) = sim.get_state();
         to_dense(&state, n)
-    }
-
-    fn to_dense(sparse: &[(BigUint, Complex64)], num_qubits: usize) -> Vec<Complex64> {
-        let dim = 1usize << num_qubits;
-        let mut dense = vec![Complex64::new(0.0, 0.0); dim];
-        for (idx, amp) in sparse {
-            let i = idx.to_u64_digits().first().copied().unwrap_or(0) as usize;
-            if i < dim {
-                dense[i] = *amp;
-            }
-        }
-        dense
-    }
-
-    struct Metrics {
-        max_error: f64,
-        rms_error: f64,
-        fidelity: f64,
-        trace_distance: f64,
-    }
-
-    fn compute_metrics(gpu: &[Complex64], reference: &[Complex64]) -> Metrics {
-        let n = reference.len();
-        let mut max_err = 0.0_f64;
-        let mut sum_sq = 0.0_f64;
-        let mut inner = Complex64::new(0.0, 0.0);
-
-        for i in 0..n {
-            let diff = gpu[i] - reference[i];
-            let err = diff.norm();
-            max_err = max_err.max(err);
-            sum_sq += err * err;
-            inner += reference[i].conj() * gpu[i];
-        }
-
-        let rms = (sum_sq / n as f64).sqrt();
-        let fid = inner.norm_sqr();
-        let td = (1.0 - fid).max(0.0).sqrt();
-
-        Metrics {
-            max_error: max_err,
-            rms_error: rms,
-            fidelity: fid,
-            trace_distance: td,
-        }
     }
 
     pub fn run() {

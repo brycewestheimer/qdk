@@ -1,5 +1,3 @@
-use wgpu::util::DeviceExt;
-
 use crate::ActivePrecision;
 use crate::error::GpuSimError;
 #[cfg(not(feature = "f64_emulation"))]
@@ -32,6 +30,10 @@ pub struct MeasurementEngine {
     partial_sums_staging: wgpu::Buffer,
     /// Number of workgroups to dispatch (capped at `MAX_MEASUREMENT_WORKGROUPS`).
     num_workgroups: u32,
+    /// Pre-allocated uniform buffer for `MeasureParams` (16 bytes).
+    measure_param_buffer: wgpu::Buffer,
+    /// Pre-allocated uniform buffer for `CollapseParams` / `CollapseParamsF64` (32 bytes).
+    collapse_param_buffer: wgpu::Buffer,
 }
 
 impl MeasurementEngine {
@@ -60,10 +62,27 @@ impl MeasurementEngine {
             mapped_at_creation: false,
         });
 
+        let measure_param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("measure_param_pool"),
+            size: std::mem::size_of::<MeasureParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let collapse_param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("collapse_param_pool"),
+            // max(sizeof CollapseParams, sizeof CollapseParamsF64) = 32
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             partial_sums_buffer,
             partial_sums_staging,
             num_workgroups,
+            measure_param_buffer,
+            collapse_param_buffer,
         }
     }
 
@@ -76,6 +95,12 @@ impl MeasurementEngine {
     /// `min(ceil(2^num_qubits / 256), self.num_workgroups)`. For small state
     /// vectors (< 256 * `num_workgroups` amplitudes), this avoids launching
     /// workgroups that would do no work.
+    ///
+    /// # Concurrency
+    ///
+    /// Takes `&self` but mutates the staging buffer's mapped state. Concurrent
+    /// calls would race. The caller must ensure exclusive access, currently
+    /// guaranteed by `GpuQuantumSim` being `!Sync`.
     pub fn compute_probability(
         &self,
         device: &wgpu::Device,
@@ -85,19 +110,14 @@ impl MeasurementEngine {
         measure_mask: u32,
         num_qubits: u32,
     ) -> Result<f64, GpuSimError> {
-        // Step 1: Create the uniform buffer with measurement parameters.
+        // Step 1: Write measurement parameters to the pre-allocated buffer.
         let params = MeasureParams {
             target_bit: measure_mask.trailing_zeros(),
             num_qubits,
             measure_mask,
             _pad: 0,
         };
-
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("measure_params"),
-            contents: bytemuck::bytes_of(&params),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        queue.write_buffer(&self.measure_param_buffer, 0, bytemuck::bytes_of(&params));
 
         // Dynamic workgroup count: scale to state size, capped at pre-allocated max.
         let num_amplitudes = 1u64 << num_qubits;
@@ -117,7 +137,7 @@ impl MeasurementEngine {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: uniform_buffer.as_entire_binding(),
+                    resource: self.measure_param_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -151,23 +171,13 @@ impl MeasurementEngine {
         );
         queue.submit(std::iter::once(encoder.finish()));
 
-        // Step 5: Map the staging buffer and wait for completion.
-        let buffer_slice = self.partial_sums_staging.slice(..copy_size);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| GpuSimError::DevicePollFailed(format!("{e}")))?;
-        receiver
-            .recv()
-            .map_err(|_| GpuSimError::ChannelDisconnected)?
-            .map_err(|e| GpuSimError::BufferMapRejected(format!("{e}")))?;
-
-        // Step 6-7: Read partial sums and accumulate with Kahan summation.
-        let data = buffer_slice.get_mapped_range();
-        let partial_sums: &[f32] = bytemuck::cast_slice(&data);
+        // Step 5-7: Map staging buffer, read partial sums, accumulate.
+        let raw = crate::gpu::buffer::readback_staging_buffer(
+            device,
+            &self.partial_sums_staging,
+            copy_size,
+        )?;
+        let partial_sums: &[f32] = bytemuck::cast_slice(&raw);
 
         // Kahan compensated summation in f64 for maximum accuracy.
         let mut sum = 0.0_f64;
@@ -196,11 +206,7 @@ impl MeasurementEngine {
             }
         }
 
-        // Step 8: Clean up.
-        drop(data);
-        self.partial_sums_staging.unmap();
-
-        // Step 9: Clamp to valid probability range.
+        // Step 8: Clamp to valid probability range.
         Ok(sum.clamp(0.0, 1.0))
     }
 
@@ -230,8 +236,9 @@ impl MeasurementEngine {
             .min(u64::from(MAX_DISPATCH_WORKGROUPS)) as u32;
 
         // Collapse uses the GATE bind group layout (2 bindings: rw storage + uniform).
+        // Write params to the pre-allocated collapse buffer.
         #[cfg(not(feature = "f64_emulation"))]
-        let uniform_buffer = {
+        {
             #[allow(clippy::cast_possible_truncation)]
             let normalization_factor = 1.0_f32 / (probability as f32).sqrt();
             let params = CollapseParams {
@@ -244,15 +251,11 @@ impl MeasurementEngine {
                 _pad1: 0,
                 _pad2: 0,
             };
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("collapse_params"),
-                contents: bytemuck::bytes_of(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            })
-        };
+            queue.write_buffer(&self.collapse_param_buffer, 0, bytemuck::bytes_of(&params));
+        }
 
         #[cfg(feature = "f64_emulation")]
-        let uniform_buffer = {
+        {
             let norm_f64 = 1.0 / probability.sqrt();
             let (norm_hi, norm_lo) = crate::precision::to_ds(norm_f64);
             let params = CollapseParamsF64 {
@@ -265,12 +268,8 @@ impl MeasurementEngine {
                 _pad2: 0,
                 _pad3: 0,
             };
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("collapse_params"),
-                contents: bytemuck::bytes_of(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            })
-        };
+            queue.write_buffer(&self.collapse_param_buffer, 0, bytemuck::bytes_of(&params));
+        }
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("collapse_bind_group"),
@@ -282,7 +281,7 @@ impl MeasurementEngine {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: uniform_buffer.as_entire_binding(),
+                    resource: self.collapse_param_buffer.as_entire_binding(),
                 },
             ],
         });

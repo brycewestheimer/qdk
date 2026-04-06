@@ -244,7 +244,12 @@ impl StateBuffer {
     ///
     /// The caller must ensure the buffer has sufficient capacity via
     /// `ensure_capacity` before calling this method.
-    pub fn initialize(&mut self, queue: &wgpu::Queue, num_qubits: u32) {
+    pub(crate) fn initialize(&mut self, queue: &wgpu::Queue, num_qubits: u32) {
+        debug_assert!(
+            self.num_qubits == 0,
+            "initialize() should only be called on first allocation, not after {} qubits",
+            self.num_qubits,
+        );
         self.num_qubits = num_qubits;
         self.num_amplitudes = 1u64
             .checked_shl(num_qubits)
@@ -296,30 +301,11 @@ impl StateBuffer {
         encoder.copy_buffer_to_buffer(&self.buffer, 0, &self.staging_buffer, 0, active_size);
         queue.submit(std::iter::once(encoder.finish()));
 
-        // Step 2: Map the staging buffer
-        let buffer_slice = self.staging_buffer.slice(..active_size);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| GpuSimError::DevicePollFailed(format!("{e}")))?;
-        receiver
-            .recv()
-            .map_err(|_| GpuSimError::ChannelDisconnected)?
-            .map_err(|e| GpuSimError::BufferMapRejected(format!("{e}")))?;
-
-        // Step 3: Read the data
-        let data = buffer_slice.get_mapped_range();
-        let floats: &[f32] = bytemuck::cast_slice(&data);
-        let result = floats.to_vec();
-
-        // Step 4: Unmap
-        drop(data);
-        self.staging_buffer.unmap();
-
-        Ok(result)
+        // Steps 2-4: Map, read, unmap via shared utility.
+        let raw =
+            crate::gpu::buffer::readback_staging_buffer(device, &self.staging_buffer, active_size)?;
+        let floats: &[f32] = bytemuck::cast_slice(&raw);
+        Ok(floats.to_vec())
     }
 
     /// Returns a reference to the primary state buffer for bind group creation.

@@ -6,6 +6,15 @@ use crate::error::GpuSimError;
 /// highest bit position ever assigned. Releasing a qubit does NOT shrink the
 /// state vector; the bit position is simply marked as inactive and recycled
 /// when a new qubit is allocated.
+///
+/// # Recycling order
+///
+/// Released IDs and bit positions are recycled in LIFO order (last released
+/// is first reused). This differs from the sparse simulator, which reuses
+/// the lowest available ID. The ordering does not affect simulation
+/// correctness — qubit IDs are arbitrary labels — but may produce
+/// different ID assignment sequences for identical allocation/release
+/// patterns.
 pub struct QubitMap {
     /// Maps qubit ID -> bit position. `None` if the ID is not active.
     id_to_bit: Vec<Option<usize>>,

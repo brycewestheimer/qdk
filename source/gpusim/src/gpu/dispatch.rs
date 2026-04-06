@@ -4,6 +4,17 @@ use crate::gpu::state_buffer::StateBuffer;
 #[cfg(feature = "f64_emulation")]
 use crate::precision;
 
+/// Bundles the invariant GPU resources for gate dispatch.
+///
+/// Created once per gate invocation via `GpuQuantumSim::dispatch_ctx()`
+/// to avoid threading 4 separate references through every call.
+pub(crate) struct DispatchContext<'a> {
+    pub device: &'a wgpu::Device,
+    pub queue: &'a wgpu::Queue,
+    pub cache: &'a PipelineCache,
+    pub param_buffer: &'a wgpu::Buffer,
+}
+
 /// Maximum number of workgroups that can be dispatched in a single dimension.
 ///
 /// Per the WebGPU spec, `maxComputeWorkgroupsPerDimension` is at least 65535.
@@ -240,17 +251,12 @@ fn capped_workgroup_count(num_items: u64) -> u32 {
 /// The state vector is modified in-place on the GPU. No CPU synchronization
 /// occurs -- the operation is fully asynchronous from the CPU's perspective,
 /// but wgpu ensures sequential execution of submitted commands.
-// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_single_qubit_gate(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipeline_cache: &PipelineCache,
+pub(crate) fn dispatch_single_qubit_gate(
+    ctx: &DispatchContext,
     state_buffer: &StateBuffer,
     gate: &Mat2x2,
     target_bit: u32,
     num_qubits: u32,
-    param_buffer: &wgpu::Buffer,
 ) {
     let num_pairs = 1u64 << (num_qubits - 1);
     let workgroup_count = capped_workgroup_count(num_pairs);
@@ -271,7 +277,8 @@ pub fn dispatch_single_qubit_gate(
             num_workgroups: workgroup_count,
             _pad: 0,
         };
-        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+        ctx.queue
+            .write_buffer(ctx.param_buffer, 0, bytemuck::bytes_of(&params));
     }
 
     #[cfg(feature = "f64_emulation")]
@@ -283,12 +290,13 @@ pub fn dispatch_single_qubit_gate(
             _pad: 0,
             matrix: encode_2x2_ds(gate),
         };
-        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+        ctx.queue
+            .write_buffer(ctx.param_buffer, 0, bytemuck::bytes_of(&params));
     }
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("gate_bind_group"),
-        layout: pipeline_cache.bind_group_layout(),
+        layout: ctx.cache.bind_group_layout(),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -296,24 +304,26 @@ pub fn dispatch_single_qubit_gate(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: param_buffer.as_entire_binding(),
+                resource: ctx.param_buffer.as_entire_binding(),
             },
         ],
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("gate_encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gate_encoder"),
+        });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("single_qubit_gate_pass"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(pipeline_cache.single_qubit_pipeline());
+        pass.set_pipeline(ctx.cache.single_qubit_pipeline());
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
-    queue.submit(std::iter::once(encoder.finish()));
+    ctx.queue.submit(std::iter::once(encoder.finish()));
 }
 
 /// Dispatches a two-qubit gate operation to the GPU.
@@ -325,18 +335,13 @@ pub fn dispatch_single_qubit_gate(
 ///
 /// # Panics
 /// Panics if `bit_a == bit_b` or `num_qubits < 2`.
-// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_two_qubit_gate(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipeline_cache: &PipelineCache,
+pub(crate) fn dispatch_two_qubit_gate(
+    ctx: &DispatchContext,
     state_buffer: &StateBuffer,
     gate: &Mat4x4,
     bit_a: u32,
     bit_b: u32,
     num_qubits: u32,
-    param_buffer: &wgpu::Buffer,
 ) {
     assert_ne!(bit_a, bit_b, "two-qubit gate requires distinct qubits");
     assert!(
@@ -367,7 +372,8 @@ pub fn dispatch_two_qubit_gate(
             num_qubits,
             num_workgroups: workgroup_count,
         };
-        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+        ctx.queue
+            .write_buffer(ctx.param_buffer, 0, bytemuck::bytes_of(&params));
     }
 
     #[cfg(feature = "f64_emulation")]
@@ -379,12 +385,13 @@ pub fn dispatch_two_qubit_gate(
             num_workgroups: workgroup_count,
             mat: encode_4x4_ds(gate),
         };
-        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+        ctx.queue
+            .write_buffer(ctx.param_buffer, 0, bytemuck::bytes_of(&params));
     }
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("two_qubit_bind_group"),
-        layout: pipeline_cache.bind_group_layout(),
+        layout: ctx.cache.bind_group_layout(),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -392,24 +399,26 @@ pub fn dispatch_two_qubit_gate(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: param_buffer.as_entire_binding(),
+                resource: ctx.param_buffer.as_entire_binding(),
             },
         ],
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("two_qubit_gate_encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("two_qubit_gate_encoder"),
+        });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("two_qubit_gate_pass"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(pipeline_cache.two_qubit_pipeline());
+        pass.set_pipeline(ctx.cache.two_qubit_pipeline());
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
-    queue.submit(std::iter::once(encoder.finish()));
+    ctx.queue.submit(std::iter::once(encoder.finish()));
 }
 
 /// Dispatches a multi-controlled gate operation to the GPU.
@@ -419,18 +428,13 @@ pub fn dispatch_two_qubit_gate(
 ///
 /// # Panics
 /// Panics if `target_bit` is set in `control_mask`.
-// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_multi_controlled_gate(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipeline_cache: &PipelineCache,
+pub(crate) fn dispatch_multi_controlled_gate(
+    ctx: &DispatchContext,
     state_buffer: &StateBuffer,
     gate: &Mat2x2,
     target_bit: u32,
     control_mask: u32,
     num_qubits: u32,
-    param_buffer: &wgpu::Buffer,
 ) {
     assert_eq!(
         control_mask & (1 << target_bit),
@@ -457,7 +461,8 @@ pub fn dispatch_multi_controlled_gate(
             control_mask,
             num_workgroups: workgroup_count,
         };
-        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+        ctx.queue
+            .write_buffer(ctx.param_buffer, 0, bytemuck::bytes_of(&params));
     }
 
     #[cfg(feature = "f64_emulation")]
@@ -469,12 +474,13 @@ pub fn dispatch_multi_controlled_gate(
             num_workgroups: workgroup_count,
             matrix: encode_2x2_ds(gate),
         };
-        queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+        ctx.queue
+            .write_buffer(ctx.param_buffer, 0, bytemuck::bytes_of(&params));
     }
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("multi_controlled_bind_group"),
-        layout: pipeline_cache.bind_group_layout(),
+        layout: ctx.cache.bind_group_layout(),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -482,24 +488,26 @@ pub fn dispatch_multi_controlled_gate(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: param_buffer.as_entire_binding(),
+                resource: ctx.param_buffer.as_entire_binding(),
             },
         ],
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("multi_controlled_gate_encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("multi_controlled_gate_encoder"),
+        });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("multi_controlled_gate_pass"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(pipeline_cache.multi_controlled_pipeline());
+        pass.set_pipeline(ctx.cache.multi_controlled_pipeline());
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
-    queue.submit(std::iter::once(encoder.finish()));
+    ctx.queue.submit(std::iter::once(encoder.finish()));
 }
 
 /// Dispatches a single-qubit gate with f64-precision matrix in DS format.
@@ -508,17 +516,12 @@ pub fn dispatch_multi_controlled_gate(
 /// It accepts a `Mat2x2F64` (f64 complex entries) and encodes them directly
 /// to DS format via [`encode_2x2_ds_f64`], bypassing f32 intermediates.
 #[cfg(feature = "f64_emulation")]
-// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_single_qubit_gate_f64(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipeline_cache: &PipelineCache,
+pub(crate) fn dispatch_single_qubit_gate_f64(
+    ctx: &DispatchContext,
     state_buffer: &StateBuffer,
     gate: &crate::gates::Mat2x2F64,
     target_bit: u32,
     num_qubits: u32,
-    param_buffer: &wgpu::Buffer,
 ) {
     let num_pairs = 1u64 << (num_qubits - 1);
     let workgroup_count = capped_workgroup_count(num_pairs);
@@ -530,11 +533,12 @@ pub fn dispatch_single_qubit_gate_f64(
         _pad: 0,
         matrix: encode_2x2_ds_f64(gate),
     };
-    queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+    ctx.queue
+        .write_buffer(ctx.param_buffer, 0, bytemuck::bytes_of(&params));
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("gate_bind_group"),
-        layout: pipeline_cache.bind_group_layout(),
+        layout: ctx.cache.bind_group_layout(),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -542,24 +546,26 @@ pub fn dispatch_single_qubit_gate_f64(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: param_buffer.as_entire_binding(),
+                resource: ctx.param_buffer.as_entire_binding(),
             },
         ],
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("gate_encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gate_encoder"),
+        });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("single_qubit_gate_f64_pass"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(pipeline_cache.single_qubit_pipeline());
+        pass.set_pipeline(ctx.cache.single_qubit_pipeline());
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
-    queue.submit(std::iter::once(encoder.finish()));
+    ctx.queue.submit(std::iter::once(encoder.finish()));
 }
 
 /// Dispatches a multi-controlled gate with f64-precision matrix in DS format.
@@ -570,18 +576,13 @@ pub fn dispatch_single_qubit_gate_f64(
 /// # Panics
 /// Panics if `target_bit` is set in `control_mask`.
 #[cfg(feature = "f64_emulation")]
-// All parameters are required by the GPU dispatch pipeline; bundling into a struct would not improve clarity.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_multi_controlled_gate_f64(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipeline_cache: &PipelineCache,
+pub(crate) fn dispatch_multi_controlled_gate_f64(
+    ctx: &DispatchContext,
     state_buffer: &StateBuffer,
     gate: &crate::gates::Mat2x2F64,
     target_bit: u32,
     control_mask: u32,
     num_qubits: u32,
-    param_buffer: &wgpu::Buffer,
 ) {
     assert_eq!(
         control_mask & (1 << target_bit),
@@ -599,11 +600,12 @@ pub fn dispatch_multi_controlled_gate_f64(
         num_workgroups: workgroup_count,
         matrix: encode_2x2_ds_f64(gate),
     };
-    queue.write_buffer(param_buffer, 0, bytemuck::bytes_of(&params));
+    ctx.queue
+        .write_buffer(ctx.param_buffer, 0, bytemuck::bytes_of(&params));
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("multi_controlled_bind_group"),
-        layout: pipeline_cache.bind_group_layout(),
+        layout: ctx.cache.bind_group_layout(),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -611,24 +613,26 @@ pub fn dispatch_multi_controlled_gate_f64(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: param_buffer.as_entire_binding(),
+                resource: ctx.param_buffer.as_entire_binding(),
             },
         ],
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("multi_controlled_gate_encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("multi_controlled_gate_encoder"),
+        });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("multi_controlled_gate_f64_pass"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(pipeline_cache.multi_controlled_pipeline());
+        pass.set_pipeline(ctx.cache.multi_controlled_pipeline());
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
-    queue.submit(std::iter::once(encoder.finish()));
+    ctx.queue.submit(std::iter::once(encoder.finish()));
 }
 
 /// Parameters for the measurement (probability reduction) shader.

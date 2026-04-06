@@ -3,6 +3,14 @@ use wgpu::{Adapter, Device, DeviceType, Queue};
 use crate::error::GpuSimError;
 
 /// Holds the wgpu device, queue, and capability metadata.
+///
+/// # Sharing
+///
+/// `GpuDevice` is intended to be shared across modules via `Arc<GpuDevice>`.
+/// The current implementation uses direct ownership in `GpuQuantumSim`,
+/// but the crate reorganization will move to `Arc`-based sharing to support
+/// cross-module composition (e.g., expectation evaluation borrowing the
+/// state buffer from a statevec simulator while using its own pipelines).
 pub struct GpuDevice {
     device: Device,
     queue: Queue,
@@ -229,3 +237,9 @@ impl GpuDevice {
         from_memory.min(u32_index_limit)
     }
 }
+
+// Compile-time assertion that GpuDevice is Send.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<GpuDevice>();
+};

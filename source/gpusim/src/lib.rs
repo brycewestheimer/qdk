@@ -3,6 +3,8 @@ pub mod gates;
 pub mod gpu;
 pub mod measurement;
 pub mod precision;
+#[cfg(any(test, feature = "gpu-tests"))]
+pub mod precision_utils;
 #[cfg(feature = "python")]
 mod python;
 pub mod qubit_map;
@@ -18,6 +20,7 @@ use crate::error::GpuSimError;
 use crate::gates::Mat2x2;
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dispatch;
+use crate::gpu::dispatch::DispatchContext;
 use crate::gpu::pipeline::PipelineCache;
 use crate::gpu::state_buffer::StateBuffer;
 use crate::measurement::MeasurementEngine;
@@ -244,15 +247,13 @@ impl GpuQuantumSim {
         #[cfg(feature = "f64_emulation")]
         {
             let bit = self.resolve_bit(target);
+            let ctx = self.dispatch_ctx();
             dispatch::dispatch_single_qubit_gate_f64(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
+                &ctx,
                 &self.state,
                 &crate::gates::rx_f64(theta),
                 bit,
                 self.state.num_qubits(),
-                &self.param_buffer,
             );
         }
     }
@@ -265,15 +266,13 @@ impl GpuQuantumSim {
         #[cfg(feature = "f64_emulation")]
         {
             let bit = self.resolve_bit(target);
+            let ctx = self.dispatch_ctx();
             dispatch::dispatch_single_qubit_gate_f64(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
+                &ctx,
                 &self.state,
                 &crate::gates::ry_f64(theta),
                 bit,
                 self.state.num_qubits(),
-                &self.param_buffer,
             );
         }
     }
@@ -286,15 +285,13 @@ impl GpuQuantumSim {
         #[cfg(feature = "f64_emulation")]
         {
             let bit = self.resolve_bit(target);
+            let ctx = self.dispatch_ctx();
             dispatch::dispatch_single_qubit_gate_f64(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
+                &ctx,
                 &self.state,
                 &crate::gates::rz_f64(theta),
                 bit,
                 self.state.num_qubits(),
-                &self.param_buffer,
             );
         }
     }
@@ -386,16 +383,14 @@ impl GpuQuantumSim {
     pub fn swap(&mut self, q1: usize, q2: usize) {
         let bit_a = self.resolve_bit(q1);
         let bit_b = self.resolve_bit(q2);
+        let ctx = self.dispatch_ctx();
         dispatch::dispatch_two_qubit_gate(
-            self.gpu.device(),
-            self.gpu.queue(),
-            &self.pipelines,
+            &ctx,
             &self.state,
             &crate::gates::SWAP,
             bit_a,
             bit_b,
             self.state.num_qubits(),
-            &self.param_buffer,
         );
     }
 
@@ -545,6 +540,14 @@ impl GpuQuantumSim {
     /// Returns `f64` for API compatibility with `QuantumSim`, even though
     /// the internal computation uses f32.
     ///
+    /// # Thread safety
+    ///
+    /// This method takes `&self` but internally maps and unmaps a shared
+    /// staging buffer via GPU readback. It is safe because `GpuQuantumSim`
+    /// is `!Sync` (contains `StdRng`), preventing concurrent access. If the
+    /// simulator is ever made `Sync`, the measurement engine's staging buffer
+    /// must be protected by a mutex or replaced with per-call staging.
+    ///
     /// # Errors
     ///
     /// Returns a `GpuSimError` if the probability readback fails.
@@ -606,9 +609,12 @@ impl GpuQuantumSim {
     ///
     /// # Panics
     ///
-    /// Panics if the internal measurement fails due to a GPU error. A failed
-    /// release leaves the simulator in an inconsistent state, so there is no
-    /// meaningful recovery path.
+    /// Panics if the internal measurement fails due to a GPU error.
+    /// `release` does not return `Result` because a failed release leaves
+    /// the simulator in an inconsistent state (the qubit is partially
+    /// released — measured but not removed from the map). There is no
+    /// meaningful recovery path, and this matches the sparse simulator's
+    /// `release()` behavior which also panics on internal errors.
     pub fn release(&mut self, id: usize) {
         // Always measure and reset. This is simpler and more correct than the
         // previous approach of checking qubit_is_zero() first, because:
@@ -732,6 +738,20 @@ impl GpuQuantumSim {
         &self.rng
     }
 
+    /// Returns a reference to the internal state buffer.
+    #[must_use]
+    #[allow(dead_code)] // API surface for future cross-module composition
+    pub(crate) fn state_buffer(&self) -> &StateBuffer {
+        &self.state
+    }
+
+    /// Returns the current number of qubits in the state vector.
+    #[must_use]
+    #[allow(dead_code)] // API surface for future cross-module composition
+    pub(crate) fn num_active_qubits(&self) -> u32 {
+        self.state.num_qubits()
+    }
+
     /// Synchronously waits for all submitted GPU work to complete.
     ///
     /// This is a no-op in terms of simulator state, but ensures that all
@@ -742,6 +762,17 @@ impl GpuQuantumSim {
         if let Err(e) = self.gpu.device().poll(wgpu::PollType::wait_indefinitely()) {
             log::warn!("GPU poll failed: {e}");
         }
+    }
+
+    /// Like [`sync_gpu`], but panics on failure.
+    ///
+    /// Use this in benchmarks where a poll failure means the timing data
+    /// is unreliable and continuing would produce misleading results.
+    pub fn sync_gpu_strict(&self) {
+        self.gpu
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU sync failed — benchmark timing is unreliable");
     }
 
     // ========================================================================
@@ -759,18 +790,26 @@ impl GpuQuantumSim {
         bit
     }
 
+    /// Creates a `DispatchContext` bundling the GPU resources for gate dispatch.
+    fn dispatch_ctx(&self) -> DispatchContext<'_> {
+        DispatchContext {
+            device: self.gpu.device(),
+            queue: self.gpu.queue(),
+            cache: &self.pipelines,
+            param_buffer: &self.param_buffer,
+        }
+    }
+
     /// Dispatches a single-qubit gate to the GPU.
     fn dispatch_single_qubit(&mut self, target: usize, matrix: &Mat2x2) {
         let bit = self.resolve_bit(target);
+        let ctx = self.dispatch_ctx();
         dispatch::dispatch_single_qubit_gate(
-            self.gpu.device(),
-            self.gpu.queue(),
-            &self.pipelines,
+            &ctx,
             &self.state,
             matrix,
             bit,
             self.state.num_qubits(),
-            &self.param_buffer,
         );
     }
 
@@ -802,18 +841,10 @@ impl GpuQuantumSim {
     fn dispatch_mc_gate(&mut self, ctls: &[usize], target: usize, matrix: &Mat2x2) {
         let target_bit = self.resolve_bit(target);
         let n = self.state.num_qubits();
+        let ctx = self.dispatch_ctx();
 
         if ctls.is_empty() {
-            dispatch::dispatch_single_qubit_gate(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
-                &self.state,
-                matrix,
-                target_bit,
-                n,
-                &self.param_buffer,
-            );
+            dispatch::dispatch_single_qubit_gate(&ctx, &self.state, matrix, target_bit, n);
         } else {
             let control_mask = self.build_control_mask(ctls);
             assert_eq!(
@@ -822,15 +853,12 @@ impl GpuQuantumSim {
                 "target qubit must not also be a control"
             );
             dispatch::dispatch_multi_controlled_gate(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
+                &ctx,
                 &self.state,
                 matrix,
                 target_bit,
                 control_mask,
                 n,
-                &self.param_buffer,
             );
         }
     }
@@ -848,18 +876,10 @@ impl GpuQuantumSim {
     ) {
         let target_bit = self.resolve_bit(target);
         let n = self.state.num_qubits();
+        let ctx = self.dispatch_ctx();
 
         if ctls.is_empty() {
-            dispatch::dispatch_single_qubit_gate_f64(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
-                &self.state,
-                matrix,
-                target_bit,
-                n,
-                &self.param_buffer,
-            );
+            dispatch::dispatch_single_qubit_gate_f64(&ctx, &self.state, matrix, target_bit, n);
         } else {
             let control_mask = self.build_control_mask(ctls);
             assert_eq!(
@@ -868,15 +888,12 @@ impl GpuQuantumSim {
                 "target qubit must not also be a control"
             );
             dispatch::dispatch_multi_controlled_gate_f64(
-                self.gpu.device(),
-                self.gpu.queue(),
-                &self.pipelines,
+                &ctx,
                 &self.state,
                 matrix,
                 target_bit,
                 control_mask,
                 n,
-                &self.param_buffer,
             );
         }
     }
@@ -979,22 +996,8 @@ fn main() {
     encoder.copy_buffer_to_buffer(&result_buffer, 0, &staging_buffer, 0, 4);
     queue.submit(std::iter::once(encoder.finish()));
 
-    let buffer_slice = staging_buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    buffer_slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuSimError::DevicePollFailed(format!("FMA test poll: {e}")))?;
-    rx.recv()
-        .map_err(|_| GpuSimError::ChannelDisconnected)?
-        .map_err(|e| GpuSimError::DeviceError(format!("FMA test readback failed: {e}")))?;
-
-    let data = buffer_slice.get_mapped_range();
-    let result_val = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    drop(data);
-    staging_buffer.unmap();
+    let raw = crate::gpu::buffer::readback_staging_buffer(device, &staging_buffer, 4)?;
+    let result_val = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
 
     if result_val == 0.0 {
         return Err(GpuSimError::FmaNotFused);

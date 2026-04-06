@@ -33,7 +33,7 @@ fn random_circuit_scaling(c: &mut Criterion) {
                     b.iter(|| {
                         let mut sim = make_gpu_sim(num_qubits);
                         apply_circuit_gpu(&mut sim, &circuit);
-                        sim.sync_gpu();
+                        sim.sync_gpu_strict();
                         black_box(&sim);
                     });
                 },
@@ -67,7 +67,7 @@ fn qft_scaling(c: &mut Criterion) {
             b.iter(|| {
                 let mut sim = make_gpu_sim(num_qubits);
                 apply_circuit_gpu(&mut sim, &circuit);
-                sim.sync_gpu();
+                sim.sync_gpu_strict();
                 black_box(&sim);
             });
         });
@@ -104,7 +104,7 @@ fn chemistry_circuit(c: &mut Criterion) {
                 b.iter(|| {
                     let mut sim = make_gpu_sim(total);
                     apply_circuit_gpu(&mut sim, &circuit);
-                    sim.sync_gpu();
+                    sim.sync_gpu_strict();
                     black_box(&sim);
                 });
             });

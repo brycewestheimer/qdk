@@ -518,7 +518,9 @@ impl PyGpuQuantumSim {
 
     /// Compute the probability of odd parity for the given qubits.
     ///
-    /// This does not collapse the state.
+    /// This does not collapse the state, but it does perform a GPU
+    /// compute dispatch and CPU readback to calculate the probability.
+    /// The cost is similar to a single measurement.
     ///
     /// Args:
     ///     ids: List of qubit IDs.
@@ -527,7 +529,7 @@ impl PyGpuQuantumSim {
     ///     float: Probability in [0.0, 1.0].
     ///
     /// Raises:
-    ///     RuntimeError: If any qubit ID is invalid.
+    ///     RuntimeError: If any qubit ID is invalid or GPU readback fails.
     // PyO3 extracts Python lists into owned Vec; a reference parameter is not supported at the FFI boundary.
     #[allow(clippy::needless_pass_by_value)]
     fn joint_probability(&self, ids: Vec<usize>) -> PyResult<f64> {

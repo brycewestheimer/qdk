@@ -7,6 +7,7 @@
 use num_bigint::BigUint;
 use num_complex::Complex64;
 use qdk_gpu_sim::GpuQuantumSim;
+use qdk_gpu_sim::precision_utils::{compute_metrics, to_dense};
 use quantum_sparse_sim::QuantumSim;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -100,81 +101,8 @@ fn run_on_sparse(circuit: &[Gate], num_qubits: usize) -> Vec<(BigUint, Complex64
 }
 
 // -----------------------------------------------------------------------
-// Error metrics
+// Error metrics — imported from qdk_gpu_sim::precision_utils
 // -----------------------------------------------------------------------
-
-struct PrecisionMetrics {
-    max_error: f64,
-    rms_error: f64,
-    fidelity: f64,
-    trace_distance: f64,
-}
-
-/// Convert sparse state representation to a dense vector indexed by basis state.
-///
-/// Both simulators return sparse `(BigUint, Complex64)` pairs. To compute
-/// metrics, we expand to a full dense vector of length 2^`num_qubits`, inserting
-/// zeros for missing entries.
-fn to_dense(sparse: &[(BigUint, Complex64)], num_qubits: usize) -> Vec<Complex64> {
-    let dim = 1usize << num_qubits;
-    let mut dense = vec![Complex64::new(0.0, 0.0); dim];
-    for (idx, amp) in sparse {
-        // Convert `BigUint` index to usize. Safe because num_qubits <= 20 in our test matrix.
-        let i: usize = idx.to_u64_digits().first().copied().unwrap_or(0) as usize;
-        if i < dim {
-            dense[i] = *amp;
-        }
-    }
-    dense
-}
-
-// Compute precision metrics between GPU (f32) and sparse (f64) state vectors.
-//
-// Metrics computed:
-// - Max component error: worst-case amplitude deviation
-// - RMS error: root-mean-square amplitude deviation
-// - State fidelity: |<psi_ref|psi_gpu>|^2 (1.0 = identical)
-// - Trace distance: sqrt(1 - F), max measurement probability difference
-fn compute_metrics(gpu_dense: &[Complex64], ref_dense: &[Complex64]) -> PrecisionMetrics {
-    let n = ref_dense.len();
-    assert_eq!(gpu_dense.len(), n, "state vector length mismatch");
-
-    let mut max_err: f64 = 0.0;
-    let mut sum_sq_err: f64 = 0.0;
-    let mut inner_product = Complex64::new(0.0, 0.0);
-
-    for i in 0..n {
-        let gpu_c = gpu_dense[i];
-        let ref_c = ref_dense[i];
-
-        // Component error: |gpu - ref| (complex modulus of the difference)
-        let diff = gpu_c - ref_c;
-        let err = diff.norm();
-        max_err = max_err.max(err);
-        sum_sq_err += err * err;
-
-        // Inner product: <ref|gpu> = sum_i conj(ref[i]) * gpu[i]
-        inner_product += ref_c.conj() * gpu_c;
-    }
-
-    let rms_err = (sum_sq_err / n as f64).sqrt();
-
-    // Fidelity: |<ref|gpu>|^2
-    // For normalized states, this equals |inner_product|^2.
-    // norm_sqr() computes re^2 + im^2 for a Complex64, which is |z|^2.
-    let fidelity = inner_product.norm_sqr();
-
-    // Trace distance for pure states: sqrt(1 - F)
-    // Clamp to avoid sqrt of negative due to floating point
-    let trace_distance = (1.0 - fidelity).max(0.0).sqrt();
-
-    PrecisionMetrics {
-        max_error: max_err,
-        rms_error: rms_err,
-        fidelity,
-        trace_distance,
-    }
-}
 
 // -----------------------------------------------------------------------
 // Main precision characterization test

@@ -78,7 +78,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let idx_hi = idx | (1u << hi);
         let idx11 = idx | (1u << lo) | (1u << hi);
 
-        // Map to canonical 2-qubit basis ordering |q_a q_b>.
+        // --- Basis ordering explanation ---
+        //
+        // The 4x4 matrix rows/columns are in |q_a q_b> order:
+        //   row/col 0 = |00>  (q_a=0, q_b=0)
+        //   row/col 1 = |01>  (q_a=0, q_b=1)
+        //   row/col 2 = |10>  (q_a=1, q_b=0)
+        //   row/col 3 = |11>  (q_a=1, q_b=1)
+        //
+        // Example: CNOT with bit_a=0 (control), bit_b=2 (target), num_qubits=3
+        //   lo = 0, hi = 2
+        //   For thread_id = 0: idx = 0
+        //     idx00 = 0 (binary 000)
+        //     idx_lo = 1 (binary 001, bit 0 set)
+        //     idx_hi = 4 (binary 100, bit 2 set)
+        //     idx11 = 5 (binary 101, bits 0 and 2 set)
+        //
+        //   Since bit_a (0) < bit_b (2):
+        //     indices = [idx00, idx_hi, idx_lo, idx11] = [0, 4, 1, 5]
+        //     |01> means q_a=0, q_b=1 -> bit 2 set -> index 4  ✓
+        //     |10> means q_a=1, q_b=0 -> bit 0 set -> index 1  ✓
         var indices: array<u32, 4>;
         if (params.bit_a < params.bit_b) {
             indices = array<u32, 4>(idx00, idx_hi, idx_lo, idx11);

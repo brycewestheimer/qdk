@@ -1,3 +1,4 @@
+pub(crate) mod buffer;
 pub mod device;
 pub mod dispatch;
 pub mod pipeline;

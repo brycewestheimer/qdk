@@ -2,6 +2,13 @@
 //!
 //! These tests compare the GPU simulator's output against expected values
 //! to quantify the precision improvement from f64 emulation.
+//!
+//! These tests require BOTH feature flags:
+//!   `cargo test -p qdk-gpu-sim --features gpu-tests,f64_emulation`
+//!
+//! They are NOT included in the default `--features gpu-tests` run.
+//! Ensure they are executed as part of pre-merge validation.
+//! See `scripts/test_all_features.sh` for the full test matrix.
 
 #![cfg(all(feature = "gpu-tests", feature = "f64_emulation"))]
 

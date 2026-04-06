@@ -26,6 +26,8 @@ pub enum BenchGate {
     Ry(f64, usize),
     Rz(f64, usize),
     Cx(usize, usize),
+    /// Physical SWAP gate (applies the 4×4 SWAP unitary).
+    /// NOT a qubit ID relabeling — see `swap_qubit_ids` for that.
     Swap(usize, usize),
 }
 
@@ -228,7 +230,12 @@ pub fn apply_circuit_sparse(
             BenchGate::Ry(theta, q) => sim.ry(*theta, qubit_ids[*q]),
             BenchGate::Rz(theta, q) => sim.rz(*theta, qubit_ids[*q]),
             BenchGate::Cx(c, t) => sim.mcx(&[qubit_ids[*c]], qubit_ids[*t]),
-            BenchGate::Swap(a, b) => sim.swap_qubit_ids(qubit_ids[*a], qubit_ids[*b]),
+            BenchGate::Swap(a, b) => {
+                // Decompose SWAP into 3 CNOTs to match GPU's physical SWAP gate.
+                sim.mcx(&[qubit_ids[*a]], qubit_ids[*b]);
+                sim.mcx(&[qubit_ids[*b]], qubit_ids[*a]);
+                sim.mcx(&[qubit_ids[*a]], qubit_ids[*b]);
+            }
         }
     }
 }

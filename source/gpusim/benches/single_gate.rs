@@ -34,7 +34,7 @@ fn single_qubit_gates(c: &mut Criterion) {
                 group.bench_function(format!("H/{num_qubits}q/{pos_name}"), |b| {
                     b.iter(|| {
                         sim.h(target);
-                        sim.sync_gpu();
+                        sim.sync_gpu_strict();
                     });
                 });
             }
@@ -50,7 +50,7 @@ fn single_qubit_gates(c: &mut Criterion) {
                 group.bench_function(format!("X/{num_qubits}q/{pos_name}"), |b| {
                     b.iter(|| {
                         sim.x(target);
-                        sim.sync_gpu();
+                        sim.sync_gpu_strict();
                     });
                 });
             }
@@ -66,7 +66,7 @@ fn single_qubit_gates(c: &mut Criterion) {
                 group.bench_function(format!("T/{num_qubits}q/{pos_name}"), |b| {
                     b.iter(|| {
                         sim.t(target);
-                        sim.sync_gpu();
+                        sim.sync_gpu_strict();
                     });
                 });
             }
@@ -83,7 +83,7 @@ fn single_qubit_gates(c: &mut Criterion) {
                 group.bench_function(format!("Rx_pi4/{num_qubits}q/{pos_name}"), |b| {
                     b.iter(|| {
                         sim.rx(angle, target);
-                        sim.sync_gpu();
+                        sim.sync_gpu_strict();
                     });
                 });
             }
@@ -106,13 +106,13 @@ fn two_qubit_gates(c: &mut Criterion) {
             group.bench_function(format!("CNOT/{num_qubits}q/adjacent"), |b| {
                 b.iter(|| {
                     sim.mcx(&[0], 1);
-                    sim.sync_gpu();
+                    sim.sync_gpu_strict();
                 });
             });
             group.bench_function(format!("CNOT/{num_qubits}q/distant"), |b| {
                 b.iter(|| {
                     sim.mcx(&[0], num_qubits - 1);
-                    sim.sync_gpu();
+                    sim.sync_gpu_strict();
                 });
             });
         }
@@ -126,13 +126,13 @@ fn two_qubit_gates(c: &mut Criterion) {
             group.bench_function(format!("SWAP/{num_qubits}q/adjacent"), |b| {
                 b.iter(|| {
                     sim.swap(0, 1);
-                    sim.sync_gpu();
+                    sim.sync_gpu_strict();
                 });
             });
             group.bench_function(format!("SWAP/{num_qubits}q/distant"), |b| {
                 b.iter(|| {
                     sim.swap(0, num_qubits - 1);
-                    sim.sync_gpu();
+                    sim.sync_gpu_strict();
                 });
             });
         }
@@ -156,7 +156,7 @@ fn multi_controlled_gates(c: &mut Criterion) {
             group.bench_function(format!("MCX/{num_controls}ctrl/{num_qubits}q"), |b| {
                 b.iter(|| {
                     sim.mcx(&controls, target);
-                    sim.sync_gpu();
+                    sim.sync_gpu_strict();
                 });
             });
         }
@@ -178,7 +178,7 @@ fn gpu_vs_sparse_single_gate(c: &mut Criterion) {
             group.bench_with_input(BenchmarkId::new("gpu", num_qubits), &num_qubits, |b, _| {
                 b.iter(|| {
                     gpu_sim.h(0);
-                    gpu_sim.sync_gpu();
+                    gpu_sim.sync_gpu_strict();
                 });
             });
         }
