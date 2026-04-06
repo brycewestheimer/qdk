@@ -7,7 +7,7 @@
 mod bench_utils;
 
 #[cfg(feature = "gpu-tests")]
-use bench_utils::{make_gpu_sim, make_sparse_sim};
+use bench_utils::{make_gpu_sim, make_sparse_sim, try_make_gpu_sim};
 #[cfg(feature = "gpu-tests")]
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 #[cfg(feature = "gpu-tests")]
@@ -18,6 +18,12 @@ fn single_qubit_gates(c: &mut Criterion) {
     let mut group = c.benchmark_group("single_qubit_gates");
 
     for num_qubits in [10, 15, 20, 25, 28] {
+        // Skip qubit counts that exceed GPU buffer limits.
+        if try_make_gpu_sim(num_qubits).is_none() {
+            eprintln!("single_qubit_gates: skipping {num_qubits}q (exceeds GPU buffer limit)");
+            continue;
+        }
+
         let targets = [
             ("low", 0),
             ("mid", num_qubits / 2),

@@ -251,6 +251,16 @@ pub fn make_gpu_sim(n: usize) -> qdk_gpu_sim::GpuQuantumSim {
     sim
 }
 
+/// Try to create a `GpuQuantumSim` with `n` qubits.
+/// Returns `None` if the GPU cannot hold the required state vector.
+pub fn try_make_gpu_sim(n: usize) -> Option<qdk_gpu_sim::GpuQuantumSim> {
+    let mut sim = qdk_gpu_sim::GpuQuantumSim::new(Some(42)).ok()?;
+    for _ in 0..n {
+        sim.allocate().ok()?;
+    }
+    Some(sim)
+}
+
 /// Create a `QuantumSim` with `n` qubits pre-allocated.
 /// Returns (simulator, `qubit_ids`).
 pub fn make_sparse_sim(n: usize) -> (quantum_sparse_sim::QuantumSim, Vec<usize>) {
